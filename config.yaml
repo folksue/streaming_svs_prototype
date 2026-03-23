@@ -1,0 +1,42 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  chunk_ms: 100
+  encodec_model_name: facebook/encodec_24khz
+
+data:
+  train_manifest: data/train_manifest.json
+  valid_manifest: data/valid_manifest.json
+  train_cache: data/train_chunks.pt
+  valid_cache: data/valid_chunks.pt
+  batch_size: 4
+  num_workers: 2
+  max_seq_len: 256
+
+model:
+  latent_dim: 128
+  frames_per_chunk: 5
+  phoneme_vocab_size: 256
+  phoneme_emb_dim: 128
+  pitch_proj_dim: 64
+  time_proj_dim: 64
+  cond_dim: 256
+  ctx_hidden: 256
+  ctx_layers: 2
+  model_dim: 512
+  num_blocks: 6
+
+train:
+  epochs: 80
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+
+paths:
+  checkpoints: checkpoints
+  outputs: outputs
