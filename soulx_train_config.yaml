@@ -17,22 +17,19 @@ data:
   valid_ratio: 0.05
   min_valid_items: 16
   phoneme_vocab_path: artifacts/data/soulx_phoneme_vocab.json
-  train_cache: artifacts/data/soulx_train_chunks.pt
-  valid_cache: artifacts/data/soulx_valid_chunks.pt
+  train_cache: artifacts/data/soulx_train_codes.pt
+  valid_cache: artifacts/data/soulx_valid_codes.pt
   batch_size: 4
   num_workers: 2
   max_seq_len: 256
 
 model:
-  latent_dim: 128
   frames_per_chunk: 5
   phoneme_vocab_size: 1024
   phoneme_emb_dim: 128
   pitch_proj_dim: 64
   time_proj_dim: 64
   cond_dim: 256
-  ctx_hidden: 256
-  ctx_layers: 2
   model_dim: 512
   num_blocks: 6
 

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torchaudio
 from tqdm import tqdm
+import soundfile as sf
 
 from metadata_adapters import (
     adapter_needs_phoneme_vocab,
@@ -197,7 +198,12 @@ def chunk_sequence(
 
 
 def load_audio(path: str, target_sr: int) -> torch.Tensor:
-    wav, sr = torchaudio.load(path)
+    try:
+        wav, sr = torchaudio.load(path)
+    except Exception:
+        wav_np, sr = sf.read(path, always_2d=True)
+        wav = torch.from_numpy(wav_np).transpose(0, 1).float()
+
     if wav.size(0) > 1:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != target_sr:
