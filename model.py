@@ -65,45 +65,26 @@ class ResidualBlock(nn.Module):
         return x + self.ffn(self.norm(x))
 
 
-class FlowStyleGenerator(nn.Module):
-    """
-    Lightweight flow-matching style generator:
-      z_pred = G(eps, cond, ctx)
-    """
-
-    def __init__(self, data_dim: int, cond_dim: int, ctx_dim: int, model_dim: int = 512, num_blocks: int = 6):
-        super().__init__()
-        self.in_proj = nn.Linear(data_dim + cond_dim + ctx_dim, model_dim)
-        self.blocks = nn.ModuleList([ResidualBlock(model_dim, hidden_mult=4) for _ in range(num_blocks)])
-        self.out = nn.Linear(model_dim, data_dim)
-
-    def forward(self, eps: torch.Tensor, cond: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([eps, cond, ctx], dim=-1)
-        h = self.in_proj(x)
-        for blk in self.blocks:
-            h = blk(h)
-        return self.out(h)
-
-
 class StreamingSVSModel(nn.Module):
     def __init__(
         self,
-        latent_dim: int,
+        num_codebooks: int,
         frames_per_chunk: int,
+        codebook_size: int,
         phoneme_vocab_size: int,
         phoneme_emb_dim: int,
         pitch_proj_dim: int,
         time_proj_dim: int,
         cond_dim: int,
-        ctx_hidden: int,
-        ctx_layers: int,
+        token_emb_dim: int,
+        prev_chunk_dim: int,
         model_dim: int,
         num_blocks: int,
     ):
         super().__init__()
-        self.latent_dim = latent_dim
+        self.num_codebooks = num_codebooks
         self.frames_per_chunk = frames_per_chunk
-        self.data_dim = latent_dim * frames_per_chunk
+        self.codebook_size = codebook_size
 
         self.cond_enc = ConditionEncoder(
             phoneme_vocab_size=phoneme_vocab_size,
@@ -112,44 +93,51 @@ class StreamingSVSModel(nn.Module):
             time_proj_dim=time_proj_dim,
             cond_dim=cond_dim,
         )
-        self.ctx_gru = nn.GRU(
-            input_size=self.data_dim,
-            hidden_size=ctx_hidden,
-            num_layers=ctx_layers,
-            batch_first=True,
+        self.token_emb = nn.Embedding(codebook_size, token_emb_dim)
+        self.prev_proj = nn.Sequential(
+            nn.Linear(token_emb_dim, prev_chunk_dim),
+            nn.SiLU(),
+            nn.Linear(prev_chunk_dim, prev_chunk_dim),
         )
-        self.gen = FlowStyleGenerator(
-            data_dim=self.data_dim,
-            cond_dim=cond_dim,
-            ctx_dim=ctx_hidden,
-            model_dim=model_dim,
-            num_blocks=num_blocks,
+        self.bos_chunk = nn.Parameter(torch.zeros(prev_chunk_dim))
+        self.fuse = nn.Sequential(
+            nn.Linear(cond_dim + prev_chunk_dim, model_dim),
+            nn.SiLU(),
+            nn.Linear(model_dim, model_dim),
         )
+        self.blocks = nn.ModuleList([ResidualBlock(model_dim, hidden_mult=4) for _ in range(num_blocks)])
+        self.slot_emb = nn.Parameter(torch.randn(frames_per_chunk, num_codebooks, model_dim) * 0.02)
+        self.classifier = nn.Linear(model_dim, codebook_size)
 
-    def _shift_right(self, z_flat: torch.Tensor) -> torch.Tensor:
-        # teacher forcing prev latent: [0, z_1, z_2, ..., z_{T-1}]
-        b, t, d = z_flat.shape
-        out = torch.zeros_like(z_flat)
+    def _encode_chunk(self, codes: torch.Tensor) -> torch.Tensor:
+        emb = self.token_emb(codes)  # [B, T, F, K, E]
+        pooled = emb.mean(dim=(2, 3))
+        return self.prev_proj(pooled)
+
+    def _shift_right_chunk_repr(self, chunk_repr: torch.Tensor) -> torch.Tensor:
+        b, t, d = chunk_repr.shape
+        out = self.bos_chunk.view(1, 1, d).expand(b, t, d).clone()
         if t > 1:
-            out[:, 1:] = z_flat[:, :-1]
+            out[:, 1:] = chunk_repr[:, :-1]
         return out
+
+    def _predict_logits(self, cond: torch.Tensor, prev_repr: torch.Tensor) -> torch.Tensor:
+        h = self.fuse(torch.cat([cond, prev_repr], dim=-1))  # [B, T, H]
+        slot = self.slot_emb.view(1, 1, self.frames_per_chunk, self.num_codebooks, h.size(-1))
+        h = h.unsqueeze(2).unsqueeze(3) + slot
+        for blk in self.blocks:
+            h = blk(h)
+        return self.classifier(h)
 
     def forward_train(
         self,
-        z_gt: torch.Tensor,          # [B, T, F, D]
-        phoneme_id: torch.Tensor,    # [B, T]
-        cond_num: torch.Tensor,      # [B, T, 7]
+        codes: torch.Tensor,        # [B, T, F, K]
+        phoneme_id: torch.Tensor,   # [B, T]
+        cond_num: torch.Tensor,     # [B, T, 7]
     ) -> torch.Tensor:
-        b, t, f, d = z_gt.shape
-        z_flat = z_gt.view(b, t, f * d)
-
         cond = self.cond_enc(phoneme_id, cond_num)
-        prev = self._shift_right(z_flat)
-        ctx, _ = self.ctx_gru(prev)
-
-        eps = torch.randn_like(z_flat)
-        pred = self.gen(eps, cond, ctx)
-        return pred.view(b, t, f, d)
+        prev_repr = self._shift_right_chunk_repr(self._encode_chunk(codes))
+        return self._predict_logits(cond, prev_repr)
 
     @torch.no_grad()
     def generate(
@@ -160,17 +148,17 @@ class StreamingSVSModel(nn.Module):
     ) -> torch.Tensor:
         b, t = phoneme_id.shape
         cond = self.cond_enc(phoneme_id, cond_num)
-
-        hidden = None
-        prev = torch.zeros(b, 1, self.data_dim, device=phoneme_id.device)
+        prev_repr = self.bos_chunk.view(1, -1).expand(b, -1)
         out_chunks = []
 
         for i in range(t):
-            ctx, hidden = self.ctx_gru(prev, hidden)
-            eps = torch.randn(b, 1, self.data_dim, device=phoneme_id.device) * temperature
-            pred = self.gen(eps, cond[:, i : i + 1], ctx)
-            out_chunks.append(pred)
-            prev = pred
+            logits = self._predict_logits(cond[:, i : i + 1], prev_repr.unsqueeze(1)).squeeze(1)
+            if temperature > 0:
+                probs = torch.softmax(logits / temperature, dim=-1)
+                next_codes = torch.distributions.Categorical(probs=probs).sample()
+            else:
+                next_codes = logits.argmax(dim=-1)
+            out_chunks.append(next_codes)
+            prev_repr = self._encode_chunk(next_codes.unsqueeze(1)).squeeze(1)
 
-        z = torch.cat(out_chunks, dim=1)
-        return z.view(b, t, self.frames_per_chunk, self.latent_dim)
+        return torch.stack(out_chunks, dim=1)

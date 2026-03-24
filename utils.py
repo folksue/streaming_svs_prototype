@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict
 
@@ -24,9 +25,57 @@ def load_yaml(path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def get_repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def resolve_repo_path(path: str | os.PathLike[str] | None, repo_root: Path | None = None) -> str | None:
+    if path is None:
+        return None
+    path_obj = Path(path)
+    if path_obj.is_absolute():
+        return str(path_obj)
+    base_dir = repo_root or get_repo_root()
+    return str((base_dir / path_obj).resolve())
+
+
+def normalize_config_paths(cfg: Dict[str, Any], repo_root: Path | None = None) -> Dict[str, Any]:
+    root = repo_root or get_repo_root()
+    resolved = deepcopy(cfg)
+
+    data_cfg = resolved.get("data", {})
+    for key in (
+        "train_manifest",
+        "valid_manifest",
+        "train_audio_root",
+        "valid_audio_root",
+        "phoneme_vocab_path",
+        "train_cache",
+        "valid_cache",
+    ):
+        if key in data_cfg and data_cfg[key] is not None:
+            data_cfg[key] = resolve_repo_path(data_cfg[key], root)
+
+    logging_cfg = resolved.get("logging", {})
+    if "tensorboard_dir" in logging_cfg and logging_cfg["tensorboard_dir"] is not None:
+        logging_cfg["tensorboard_dir"] = resolve_repo_path(logging_cfg["tensorboard_dir"], root)
+
+    paths_cfg = resolved.get("paths", {})
+    for key in ("checkpoints", "outputs"):
+        if key in paths_cfg and paths_cfg[key] is not None:
+            paths_cfg[key] = resolve_repo_path(paths_cfg[key], root)
+
+    return resolved
+
+
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def save_json(path: str, payload: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def ensure_dir(path: str) -> None:
@@ -66,6 +115,25 @@ def masked_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> t
     diff = (pred - target).abs() * mask
     denom = mask.sum().clamp_min(1.0)
     return diff.sum() / denom
+
+
+def masked_code_accuracy(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    correct = (pred == target).float()
+    while mask.dim() < correct.dim():
+        mask = mask.unsqueeze(-1)
+    expanded_mask = mask.expand_as(correct)
+    correct = correct * expanded_mask
+    return correct.sum() / expanded_mask.sum().clamp_min(1.0)
+
+
+def masked_cross_entropy(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    log_probs = torch.log_softmax(logits, dim=-1)
+    target_log_probs = log_probs.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
+    while mask.dim() < target_log_probs.dim():
+        mask = mask.unsqueeze(-1)
+    expanded_mask = mask.expand_as(target_log_probs)
+    loss = -target_log_probs * expanded_mask
+    return loss.sum() / expanded_mask.sum().clamp_min(1.0)
 
 
 def continuity_metric(gen_z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

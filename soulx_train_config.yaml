@@ -1,0 +1,58 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  chunk_ms: 100
+  encodec_model_name: facebook/encodec_24khz
+
+data:
+  train_manifest: datasets/SoulX-Singer-Eval-Dataset/gmo-svs/annotation/opensource_eval.phone.target.jsonl
+  valid_manifest: empty_valid.json
+  manifest_adapter: soulx-singer-eval
+  train_manifest_adapter: soulx-singer-eval
+  valid_manifest_adapter: soulx-singer-eval
+  train_audio_root: datasets/SoulX-Singer-Eval-Dataset
+  valid_audio_root: datasets/SoulX-Singer-Eval-Dataset
+  auto_split_valid: true
+  valid_ratio: 0.05
+  min_valid_items: 16
+  phoneme_vocab_path: artifacts/data/soulx_phoneme_vocab.json
+  train_cache: artifacts/data/soulx_train_chunks.pt
+  valid_cache: artifacts/data/soulx_valid_chunks.pt
+  batch_size: 4
+  num_workers: 2
+  max_seq_len: 256
+
+model:
+  latent_dim: 128
+  frames_per_chunk: 5
+  phoneme_vocab_size: 1024
+  phoneme_emb_dim: 128
+  pitch_proj_dim: 64
+  time_proj_dim: 64
+  cond_dim: 256
+  ctx_hidden: 256
+  ctx_layers: 2
+  model_dim: 512
+  num_blocks: 6
+
+train:
+  epochs: 80
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+
+logging:
+  backends: ["console", "tensorboard"]
+  tensorboard_dir: artifacts/runs/soulx_train
+  wandb_project: streaming-svs
+  run_name: soulx-train
+  wandb_mode: offline
+
+paths:
+  checkpoints: artifacts/checkpoints/soulx_train
+  outputs: artifacts/outputs/soulx_train

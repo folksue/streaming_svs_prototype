@@ -6,10 +6,19 @@ audio:
   encodec_model_name: facebook/encodec_24khz
 
 data:
-  train_manifest: data/train_manifest.json
-  valid_manifest: data/valid_manifest.json
-  train_cache: data/train_chunks.pt
-  valid_cache: data/valid_chunks.pt
+  train_manifest: artifacts/data/train_manifest.json
+  valid_manifest: artifacts/data/valid_manifest.json
+  manifest_adapter: manifest
+  train_manifest_adapter: manifest
+  valid_manifest_adapter: manifest
+  train_audio_root: null
+  valid_audio_root: null
+  auto_split_valid: false
+  valid_ratio: 0.05
+  min_valid_items: 1
+  phoneme_vocab_path: artifacts/data/phoneme_vocab.json
+  train_cache: artifacts/data/train_chunks.pt
+  valid_cache: artifacts/data/valid_chunks.pt
   batch_size: 4
   num_workers: 2
   max_seq_len: 256
@@ -37,6 +46,13 @@ train:
   log_interval: 20
   val_interval: 1
 
+logging:
+  backends: ["console"]
+  tensorboard_dir: artifacts/runs/default
+  wandb_project: streaming-svs
+  run_name: null
+  wandb_mode: online
+
 paths:
-  checkpoints: checkpoints
-  outputs: outputs
+  checkpoints: artifacts/checkpoints
+  outputs: artifacts/outputs

@@ -3,19 +3,21 @@ from __future__ import annotations
 import argparse
 import math
 import os
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
 from dataset import SVSSequenceDataset, collate_sequences
+from logging_utils import build_metric_logger
 from model import StreamingSVSModel
 from utils import (
     WarmupCosine,
-    boundary_error,
-    continuity_metric,
     get_device,
     load_yaml,
-    masked_l1,
+    masked_cross_entropy,
+    masked_code_accuracy,
+    normalize_config_paths,
     save_checkpoint,
     set_seed,
 )
@@ -27,40 +29,54 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_model(cfg: dict, latent_dim: int, frames_per_chunk: int) -> StreamingSVSModel:
+def build_model(cfg: dict, num_codebooks: int, frames_per_chunk: int, codebook_size: int) -> StreamingSVSModel:
     m = cfg["model"]
     return StreamingSVSModel(
-        latent_dim=latent_dim,
+        num_codebooks=num_codebooks,
         frames_per_chunk=frames_per_chunk,
+        codebook_size=codebook_size,
         phoneme_vocab_size=m["phoneme_vocab_size"],
         phoneme_emb_dim=m["phoneme_emb_dim"],
         pitch_proj_dim=m["pitch_proj_dim"],
         time_proj_dim=m["time_proj_dim"],
         cond_dim=m["cond_dim"],
-        ctx_hidden=m["ctx_hidden"],
-        ctx_layers=m["ctx_layers"],
+        token_emb_dim=m.get("token_emb_dim", 128),
+        prev_chunk_dim=m.get("prev_chunk_dim", 256),
         model_dim=m["model_dim"],
         num_blocks=m["num_blocks"],
     )
 
 
-def run_epoch(model, loader, optimizer, scheduler, dev, train: bool, grad_clip: float, use_amp: bool, log_interval: int):
+def run_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    dev,
+    train: bool,
+    grad_clip: float,
+    use_amp: bool,
+    log_interval: int,
+    logger,
+    epoch: int,
+    global_step: int,
+):
     model.train(train)
     scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and train))
 
     total_loss = 0.0
-    total_cont = 0.0
+    total_acc = 0.0
     total_n = 0
 
     for step, batch in enumerate(loader, start=1):
-        z = batch["z"].to(dev)
+        codes = batch["codes"].to(dev)
         phoneme_id = batch["phoneme_id"].to(dev)
         cond_num = batch["cond_num"].to(dev)
         mask = batch["mask"].to(dev)
 
         with torch.cuda.amp.autocast(enabled=use_amp):
-            pred = model.forward_train(z_gt=z, phoneme_id=phoneme_id, cond_num=cond_num)
-            loss = masked_l1(pred, z, mask)
+            logits = model.forward_train(codes=codes, phoneme_id=phoneme_id, cond_num=cond_num)
+            loss = masked_cross_entropy(logits, codes, mask)
 
         if train:
             optimizer.zero_grad(set_to_none=True)
@@ -71,62 +87,75 @@ def run_epoch(model, loader, optimizer, scheduler, dev, train: bool, grad_clip: 
             scaler.update()
             scheduler.step()
 
-        cont = continuity_metric(pred.detach(), mask)
+        acc = masked_code_accuracy(logits.detach().argmax(dim=-1), codes, mask)
 
         total_loss += float(loss.item())
-        total_cont += float(cont.item())
+        total_acc += float(acc.item())
         total_n += 1
 
         if train and step % log_interval == 0:
-            print(f"step={step} train/l1={loss.item():.5f} train/cont={cont.item():.5f}")
+            current_lr = float(optimizer.param_groups[0]["lr"])
+            print(f"step={step} train/ce={loss.item():.5f} train/acc={acc.item():.5f}")
+            logger.log_metrics(
+                {
+                    "train/step_ce": float(loss.item()),
+                    "train/step_acc": float(acc.item()),
+                    "train/lr": current_lr,
+                    "train/epoch": float(epoch),
+                },
+                step=global_step + step,
+            )
 
     return {
-        "l1": total_loss / max(total_n, 1),
-        "continuity": total_cont / max(total_n, 1),
+        "ce": total_loss / max(total_n, 1),
+        "acc": total_acc / max(total_n, 1),
+        "global_step": global_step + total_n,
     }
 
 
 @torch.no_grad()
 def run_validation(model, loader, dev):
     model.eval()
-    total_l1 = 0.0
-    total_cont = 0.0
+    total_ce = 0.0
+    total_acc = 0.0
     total_on = 0.0
     total_off = 0.0
     n = 0
 
     for batch in loader:
-        z = batch["z"].to(dev)
+        codes = batch["codes"].to(dev)
         phoneme_id = batch["phoneme_id"].to(dev)
         cond_num = batch["cond_num"].to(dev)
         mask = batch["mask"].to(dev)
         on_b = batch["note_on_boundary"].to(dev)
         off_b = batch["note_off_boundary"].to(dev)
 
-        pred = model.forward_train(z_gt=z, phoneme_id=phoneme_id, cond_num=cond_num)
+        logits = model.forward_train(codes=codes, phoneme_id=phoneme_id, cond_num=cond_num)
+        pred_codes = logits.argmax(dim=-1)
 
-        l1 = masked_l1(pred, z, mask)
-        cont = continuity_metric(pred, mask)
-        on_err = boundary_error(pred, z, on_b * mask)
-        off_err = boundary_error(pred, z, off_b * mask)
+        ce = masked_cross_entropy(logits, codes, mask)
+        acc = masked_code_accuracy(pred_codes, codes, mask)
+        on_acc = masked_code_accuracy(pred_codes, codes, on_b * mask)
+        off_acc = masked_code_accuracy(pred_codes, codes, off_b * mask)
 
-        total_l1 += float(l1.item())
-        total_cont += float(cont.item())
-        total_on += float(on_err.item())
-        total_off += float(off_err.item())
+        total_ce += float(ce.item())
+        total_acc += float(acc.item())
+        total_on += float(on_acc.item())
+        total_off += float(off_acc.item())
         n += 1
 
     return {
-        "l1": total_l1 / max(n, 1),
-        "continuity": total_cont / max(n, 1),
-        "on_boundary_l1": total_on / max(n, 1),
-        "off_boundary_l1": total_off / max(n, 1),
+        "ce": total_ce / max(n, 1),
+        "acc": total_acc / max(n, 1),
+        "on_boundary_acc": total_on / max(n, 1),
+        "off_boundary_acc": total_off / max(n, 1),
     }
 
 
 def main() -> None:
     args = parse_args()
-    cfg = load_yaml(args.config)
+    repo_root = Path(__file__).resolve().parent
+    cfg = normalize_config_paths(load_yaml(args.config), repo_root=repo_root)
     set_seed(cfg["seed"])
 
     dev = get_device()
@@ -134,10 +163,11 @@ def main() -> None:
     train_set = SVSSequenceDataset(cfg["data"]["train_cache"], max_seq_len=cfg["data"]["max_seq_len"])
     valid_set = SVSSequenceDataset(cfg["data"]["valid_cache"], max_seq_len=cfg["data"]["max_seq_len"])
 
-    latent_dim = int(train_set.meta["latent_dim"])
+    num_codebooks = int(train_set.meta["num_codebooks"])
     frames_per_chunk = int(train_set.meta["frames_per_chunk"])
+    codebook_size = int(train_set.meta["codebook_size"])
 
-    model = build_model(cfg, latent_dim, frames_per_chunk).to(dev)
+    model = build_model(cfg, num_codebooks, frames_per_chunk, codebook_size).to(dev)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params / 1e6:.2f}M")
 
@@ -171,43 +201,72 @@ def main() -> None:
 
     ckpt_dir = cfg["paths"]["checkpoints"]
     os.makedirs(ckpt_dir, exist_ok=True)
+    logger = build_metric_logger(cfg)
+    logger.log_config(cfg)
+    logger.log_metrics({"model/num_params": float(num_params)}, step=0)
     best_val = math.inf
+    global_step = 0
 
-    for epoch in range(1, cfg["train"]["epochs"] + 1):
-        tr = run_epoch(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            dev=dev,
-            train=True,
-            grad_clip=cfg["train"]["grad_clip"],
-            use_amp=cfg["train"]["use_amp"],
-            log_interval=cfg["train"]["log_interval"],
-        )
-
-        if epoch % cfg["train"]["val_interval"] == 0:
-            va = run_validation(model, valid_loader, dev)
-            print(
-                f"epoch={epoch:03d} "
-                f"train/l1={tr['l1']:.5f} train/cont={tr['continuity']:.5f} "
-                f"val/l1={va['l1']:.5f} val/cont={va['continuity']:.5f} "
-                f"val/on={va['on_boundary_l1']:.5f} val/off={va['off_boundary_l1']:.5f}"
+    try:
+        for epoch in range(1, cfg["train"]["epochs"] + 1):
+            tr = run_epoch(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                dev=dev,
+                train=True,
+                grad_clip=cfg["train"]["grad_clip"],
+                use_amp=cfg["train"]["use_amp"],
+                log_interval=cfg["train"]["log_interval"],
+                logger=logger,
+                epoch=epoch,
+                global_step=global_step,
+            )
+            global_step = int(tr.pop("global_step"))
+            logger.log_metrics(
+                {
+                    "train/ce": float(tr["ce"]),
+                    "train/acc": float(tr["acc"]),
+                    "train/epoch": float(epoch),
+                },
+                step=global_step,
             )
 
-            payload = {
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "config": cfg,
-                "meta": train_set.meta,
-                "val": va,
-            }
-            save_checkpoint(os.path.join(ckpt_dir, "last.pt"), payload)
+            if epoch % cfg["train"]["val_interval"] == 0:
+                va = run_validation(model, valid_loader, dev)
+                print(
+                    f"epoch={epoch:03d} "
+                    f"train/ce={tr['ce']:.5f} train/acc={tr['acc']:.5f} "
+                    f"val/ce={va['ce']:.5f} val/acc={va['acc']:.5f} "
+                    f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f}"
+                )
+                logger.log_metrics(
+                    {
+                        "val/ce": float(va["ce"]),
+                        "val/acc": float(va["acc"]),
+                        "val/on_boundary_acc": float(va["on_boundary_acc"]),
+                        "val/off_boundary_acc": float(va["off_boundary_acc"]),
+                        "val/epoch": float(epoch),
+                    },
+                    step=global_step,
+                )
 
-            if va["l1"] < best_val:
-                best_val = va["l1"]
-                save_checkpoint(os.path.join(ckpt_dir, "best.pt"), payload)
+                payload = {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "config": cfg,
+                    "meta": train_set.meta,
+                    "val": va,
+                }
+                save_checkpoint(os.path.join(ckpt_dir, "last.pt"), payload)
+
+                if va["ce"] < best_val:
+                    best_val = va["ce"]
+                    save_checkpoint(os.path.join(ckpt_dir, "best.pt"), payload)
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":

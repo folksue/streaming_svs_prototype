@@ -5,9 +5,7 @@ __pycache__/
 .env
 .venv/
 venv/
-checkpoints/
-outputs/
-data/*.pt
-data/*.npz
+artifacts/
+datasets/
 *.log
 .DS_Store

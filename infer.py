@@ -10,11 +10,11 @@ import torch
 
 from dataset import SVSSequenceDataset
 from model import StreamingSVSModel
-from utils import boundary_error, continuity_metric, get_device, masked_l1
+from utils import get_device, masked_code_accuracy
 
 
 class EncodecDecoder:
-    def __init__(self, model_name: str, device: torch.device, codebook_size: int = 1024):
+    def __init__(self, model_name: str, device: torch.device):
         from transformers import EncodecModel  # type: ignore
 
         self.device = device
@@ -22,27 +22,17 @@ class EncodecDecoder:
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
-        self.codebook_size = codebook_size
 
     @torch.inference_mode()
-    def decode_from_continuous_codes(self, latent_frames: torch.Tensor) -> torch.Tensor:
-        """
-        latent_frames: [T, D] in [-1,1], where D is treated as num_codebooks.
-
-        We quantize back to integer EnCodec codes for waveform decoding.
-        """
-        x = ((latent_frames + 1.0) * 0.5 * (self.codebook_size - 1)).round().long()
-        x = x.clamp(0, self.codebook_size - 1)
-
-        # -> [num_codebooks, batch, frames]
-        audio_codes = x.transpose(0, 1).unsqueeze(1).to(self.device)
+    def decode_from_codes(self, codes: torch.Tensor) -> torch.Tensor:
+        audio_codes = codes.transpose(0, 1).unsqueeze(0).to(self.device)
+        audio_scales = [None]
 
         try:
-            decoded = self.model.decode(audio_codes=audio_codes, audio_scales=None)
+            decoded = self.model.decode(audio_codes=audio_codes, audio_scales=audio_scales)
             wav = decoded.audio_values
         except Exception:
-            # API fallback for different transformers versions
-            wav = self.model.decode(audio_codes)
+            wav = self.model.decode(audio_codes=audio_codes, audio_scales=audio_scales)[0]
         return wav.squeeze().detach().cpu()
 
 
@@ -51,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--cache", type=str, required=True)
     p.add_argument("--index", type=int, default=0)
-    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--decode_wav", action="store_true")
     p.add_argument("--out_dir", type=str, default="outputs")
     return p.parse_args()
@@ -62,15 +52,16 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
     meta = ckpt["meta"]
 
     model = StreamingSVSModel(
-        latent_dim=int(meta["latent_dim"]),
+        num_codebooks=int(meta["num_codebooks"]),
         frames_per_chunk=int(meta["frames_per_chunk"]),
+        codebook_size=int(meta["codebook_size"]),
         phoneme_vocab_size=cfg["phoneme_vocab_size"],
         phoneme_emb_dim=cfg["phoneme_emb_dim"],
         pitch_proj_dim=cfg["pitch_proj_dim"],
         time_proj_dim=cfg["time_proj_dim"],
         cond_dim=cfg["cond_dim"],
-        ctx_hidden=cfg["ctx_hidden"],
-        ctx_layers=cfg["ctx_layers"],
+        token_emb_dim=cfg.get("token_emb_dim", 128),
+        prev_chunk_dim=cfg.get("prev_chunk_dim", 256),
         model_dim=cfg["model_dim"],
         num_blocks=cfg["num_blocks"],
     ).to(dev)
@@ -90,34 +81,33 @@ def main() -> None:
     ds = SVSSequenceDataset(args.cache)
     sample = ds[args.index]
 
-    z_gt = sample.z.unsqueeze(0).to(dev)
+    codes_gt = sample.codes.unsqueeze(0).to(dev)
     phoneme = sample.phoneme_id.unsqueeze(0).to(dev)
     cond = sample.cond_num.unsqueeze(0).to(dev)
     on_b = sample.note_on_boundary.unsqueeze(0).to(dev)
     off_b = sample.note_off_boundary.unsqueeze(0).to(dev)
-    mask = torch.ones(1, z_gt.size(1), device=dev)
+    mask = torch.ones(1, codes_gt.size(1), device=dev)
 
     with torch.no_grad():
-        z_pred = model.generate(phoneme, cond, temperature=args.temperature)
+        codes_pred = model.generate(phoneme, cond, temperature=args.temperature)
 
-    l1 = masked_l1(z_pred, z_gt, mask)
-    cont = continuity_metric(z_pred, mask)
-    on_err = boundary_error(z_pred, z_gt, on_b)
-    off_err = boundary_error(z_pred, z_gt, off_b)
+    acc = masked_code_accuracy(codes_pred, codes_gt, mask)
+    on_acc = masked_code_accuracy(codes_pred, codes_gt, on_b)
+    off_acc = masked_code_accuracy(codes_pred, codes_gt, off_b)
 
     print(
-        f"utt={sample.utt_id} latent_l1={l1.item():.6f} continuity={cont.item():.6f} "
-        f"on_boundary={on_err.item():.6f} off_boundary={off_err.item():.6f}"
+        f"utt={sample.utt_id} token_acc={acc.item():.6f} "
+        f"on_boundary_acc={on_acc.item():.6f} off_boundary_acc={off_acc.item():.6f}"
     )
 
-    pred_np = z_pred.squeeze(0).cpu().numpy().astype(np.float32)
-    gt_np = z_gt.squeeze(0).cpu().numpy().astype(np.float32)
+    pred_np = codes_pred.squeeze(0).cpu().numpy().astype(np.int64)
+    gt_np = codes_gt.squeeze(0).cpu().numpy().astype(np.int64)
 
     np.savez(
         os.path.join(args.out_dir, f"sample_{args.index:04d}.npz"),
         utt_id=sample.utt_id,
-        z_pred=pred_np,
-        z_gt=gt_np,
+        codes_pred=pred_np,
+        codes_gt=gt_np,
     )
 
     if args.decode_wav:
@@ -125,8 +115,8 @@ def main() -> None:
             model_name=ckpt["config"]["audio"]["encodec_model_name"],
             device=dev,
         )
-        z_frames = z_pred.squeeze(0).reshape(-1, z_pred.size(-1))
-        wav = decoder.decode_from_continuous_codes(z_frames)
+        code_frames = codes_pred.squeeze(0).reshape(-1, codes_pred.size(-1))
+        wav = decoder.decode_from_codes(code_frames)
         out_wav = os.path.join(args.out_dir, f"sample_{args.index:04d}.wav")
         sf.write(out_wav, wav.numpy(), int(ckpt["config"]["audio"]["sample_rate"]))
         print(f"saved wav: {out_wav}")
