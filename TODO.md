@@ -70,12 +70,18 @@ Last updated: 2026-03-24
 
 ## D. Pending / Optional Next Tasks
 
+- [ ] Sync `config.yaml` and `README.md` with the discrete-codec training pipeline and cache names
+- [ ] Remove or rename stale continuous-latent artifacts to avoid mixing `z` caches with discrete `codes` caches
+- [ ] Add a cache format/version check before training so incompatible `.pt` files fail fast with a clear error
+- [ ] Replace deprecated `torch.cuda.amp` calls with `torch.amp` APIs
 - [x] Add dedicated adapters for real M4Singer metadata
 - [x] Add dedicated adapters for real Opencpop metadata
 - [x] Add richer logging backend (TensorBoard/W&B)
 - [x] Replace flow-style latent regression with discrete next-chunk codec prediction using only the previous chunk for boundary stabilization
 - [ ] Add ablation runner (conditioning variants)
 - [ ] Add pitch-aligned visualization script
+- [ ] Replace all-frame/all-codebook mean pooling for previous-chunk encoding with a stronger chunk context encoder
+- [ ] Add explicit within-chunk dependency modeling instead of predicting all frame/codebook slots from one shared chunk state
 
 ## E. Current Training Direction
 
