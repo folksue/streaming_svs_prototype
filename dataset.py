@@ -6,6 +6,9 @@ from typing import Dict, List
 import torch
 from torch.utils.data import Dataset
 
+CACHE_FORMAT = "svs_chunk_codes"
+SUPPORTED_CACHE_FORMAT_VERSION = 1
+
 
 @dataclass
 class SequenceItem:
@@ -20,8 +23,10 @@ class SequenceItem:
 class SVSSequenceDataset(Dataset):
     def __init__(self, cache_path: str, max_seq_len: int | None = None):
         payload = torch.load(cache_path, map_location="cpu")
+        validate_cache_payload(payload, cache_path)
         self.items_raw = payload["items"]
         self.meta = payload["meta"]
+        self.cache_path = cache_path
         self.max_seq_len = max_seq_len
 
     def __len__(self) -> int:
@@ -86,3 +91,124 @@ def collate_sequences(batch: List[SequenceItem]) -> Dict[str, torch.Tensor | Lis
         "note_off_boundary": note_off_boundary,
         "mask": mask,
     }
+
+
+def _require_key(container: Dict, key: str, where: str, cache_path: str):
+    if key not in container:
+        raise ValueError(f"Invalid cache '{cache_path}': missing key '{key}' in {where}.")
+
+
+def _validate_item_tensor(item: Dict, key: str, expected_dim: int, cache_path: str):
+    value = item[key]
+    if not isinstance(value, torch.Tensor):
+        raise ValueError(f"Invalid cache '{cache_path}': item['{key}'] must be a torch.Tensor.")
+    if value.dim() != expected_dim:
+        raise ValueError(
+            f"Invalid cache '{cache_path}': item['{key}'] must have dim={expected_dim}, got dim={value.dim()}."
+        )
+
+
+def validate_cache_payload(payload: Dict, cache_path: str) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid cache '{cache_path}': payload must be a dict.")
+    _require_key(payload, "items", "payload", cache_path)
+    _require_key(payload, "meta", "payload", cache_path)
+
+    items = payload["items"]
+    meta = payload["meta"]
+    if not isinstance(items, list):
+        raise ValueError(f"Invalid cache '{cache_path}': 'items' must be a list.")
+    if not items:
+        raise ValueError(f"Invalid cache '{cache_path}': 'items' is empty.")
+    if not isinstance(meta, dict):
+        raise ValueError(f"Invalid cache '{cache_path}': 'meta' must be a dict.")
+
+    required_meta = {
+        "cache_format": str,
+        "cache_format_version": int,
+        "num_codebooks": int,
+        "frames_per_chunk": int,
+        "codebook_size": int,
+        "chunk_ms": int,
+        "sample_rate": int,
+        "cond_dim": int,
+    }
+    for key, expected_type in required_meta.items():
+        _require_key(meta, key, "meta", cache_path)
+        if not isinstance(meta[key], expected_type):
+            raise ValueError(
+                f"Invalid cache '{cache_path}': meta['{key}'] must be {expected_type.__name__}, got {type(meta[key]).__name__}."
+            )
+
+    if meta["cache_format"] != CACHE_FORMAT:
+        raise ValueError(
+            f"Unsupported cache format in '{cache_path}': expected '{CACHE_FORMAT}', got '{meta['cache_format']}'."
+        )
+    if meta["cache_format_version"] != SUPPORTED_CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported cache format version in '{cache_path}': expected {SUPPORTED_CACHE_FORMAT_VERSION}, got {meta['cache_format_version']}."
+        )
+    if meta["cond_dim"] != 7:
+        raise ValueError(
+            f"Invalid cache '{cache_path}': expected meta['cond_dim']=7, got {meta['cond_dim']}."
+        )
+    if meta["num_codebooks"] <= 0 or meta["frames_per_chunk"] <= 0 or meta["codebook_size"] <= 0:
+        raise ValueError(
+            f"Invalid cache '{cache_path}': num_codebooks/frames_per_chunk/codebook_size must be positive."
+        )
+
+    expected_f = int(meta["frames_per_chunk"])
+    expected_k = int(meta["num_codebooks"])
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"Invalid cache '{cache_path}': items[{idx}] must be a dict.")
+        for key in (
+            "utt_id",
+            "codes",
+            "phoneme_id",
+            "cond_num",
+            "note_on_boundary",
+            "note_off_boundary",
+        ):
+            _require_key(item, key, f"items[{idx}]", cache_path)
+
+        _validate_item_tensor(item, "codes", expected_dim=3, cache_path=cache_path)
+        _validate_item_tensor(item, "phoneme_id", expected_dim=1, cache_path=cache_path)
+        _validate_item_tensor(item, "cond_num", expected_dim=2, cache_path=cache_path)
+        _validate_item_tensor(item, "note_on_boundary", expected_dim=1, cache_path=cache_path)
+        _validate_item_tensor(item, "note_off_boundary", expected_dim=1, cache_path=cache_path)
+
+        codes = item["codes"]
+        phoneme_id = item["phoneme_id"]
+        cond_num = item["cond_num"]
+        note_on_boundary = item["note_on_boundary"]
+        note_off_boundary = item["note_off_boundary"]
+
+        t = codes.size(0)
+        if t <= 0:
+            raise ValueError(f"Invalid cache '{cache_path}': items[{idx}] has empty time dimension.")
+        if codes.size(1) != expected_f or codes.size(2) != expected_k:
+            raise ValueError(
+                f"Invalid cache '{cache_path}': items[{idx}]['codes'] shape mismatch, expected [T,{expected_f},{expected_k}], got {tuple(codes.shape)}."
+            )
+        if phoneme_id.size(0) != t or cond_num.size(0) != t or note_on_boundary.size(0) != t or note_off_boundary.size(0) != t:
+            raise ValueError(
+                f"Invalid cache '{cache_path}': items[{idx}] time length mismatch across tensors."
+            )
+        if cond_num.size(1) != int(meta["cond_dim"]):
+            raise ValueError(
+                f"Invalid cache '{cache_path}': items[{idx}]['cond_num'] feature dim must be {meta['cond_dim']}, got {cond_num.size(1)}."
+            )
+
+
+def validate_cache_meta_compatibility(train_meta: Dict, valid_meta: Dict, train_path: str, valid_path: str) -> None:
+    keys = ("cache_format", "cache_format_version", "num_codebooks", "frames_per_chunk", "codebook_size", "cond_dim")
+    for key in keys:
+        train_v = train_meta.get(key)
+        valid_v = valid_meta.get(key)
+        if train_v != valid_v:
+            raise ValueError(
+                "Train/valid cache mismatch: "
+                f"{key} differs ({train_path}: {train_v}, {valid_path}: {valid_v}). "
+                "Please regenerate both caches with the same preprocess config."
+            )

@@ -19,6 +19,9 @@ from metadata_adapters import (
 )
 from utils import ensure_dir, get_device, load_yaml, normalize_config_paths, set_seed
 
+CACHE_FORMAT = "svs_chunk_codes"
+CACHE_FORMAT_VERSION = 1
+
 
 @dataclass
 class ChunkedItem:
@@ -259,12 +262,15 @@ def build_cache(
             for it in items
         ],
         "meta": {
+            "cache_format": CACHE_FORMAT,
+            "cache_format_version": CACHE_FORMAT_VERSION,
             "num_codebooks": num_codebooks,
             "frames_per_chunk": frames_per_chunk,
             "chunk_ms": cfg["audio"]["chunk_ms"],
             "encodec_model": cfg["audio"]["encodec_model_name"],
             "sample_rate": cfg["audio"]["sample_rate"],
             "codebook_size": encodec.codebook_size,
+            "cond_dim": 7,
         },
     }
 

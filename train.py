@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import SVSSequenceDataset, collate_sequences
+from dataset import SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
 from logging_utils import build_metric_logger
 from model import StreamingSVSModel
 from utils import (
@@ -162,6 +162,12 @@ def main() -> None:
 
     train_set = SVSSequenceDataset(cfg["data"]["train_cache"], max_seq_len=cfg["data"]["max_seq_len"])
     valid_set = SVSSequenceDataset(cfg["data"]["valid_cache"], max_seq_len=cfg["data"]["max_seq_len"])
+    validate_cache_meta_compatibility(
+        train_meta=train_set.meta,
+        valid_meta=valid_set.meta,
+        train_path=cfg["data"]["train_cache"],
+        valid_path=cfg["data"]["valid_cache"],
+    )
 
     num_codebooks = int(train_set.meta["num_codebooks"])
     frames_per_chunk = int(train_set.meta["frames_per_chunk"])

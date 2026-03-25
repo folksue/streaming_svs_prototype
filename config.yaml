@@ -24,15 +24,13 @@ data:
   max_seq_len: 256
 
 model:
-  latent_dim: 128
-  frames_per_chunk: 5
   phoneme_vocab_size: 256
   phoneme_emb_dim: 128
   pitch_proj_dim: 64
   time_proj_dim: 64
   cond_dim: 256
-  ctx_hidden: 256
-  ctx_layers: 2
+  token_emb_dim: 128
+  prev_chunk_dim: 256
   model_dim: 512
   num_blocks: 6
 
