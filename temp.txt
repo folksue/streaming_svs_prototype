@@ -1,0 +1,39 @@
+ 可以，按代码一步步拆开说（对应 preprocess() 里的 mel2note 构造）：
+
+  1. 先算这条样本总帧数
+
+  - T = int(sum(note_duration) * sr / hop)
+  - 初始化 mel2note[0..T-1] = 0
+
+  2. 对每个 note，先确定“这个 note 从哪一帧开始”
+
+  - i = round(累计时长 * sr / hop)
+  - next_i = 下一个 note 的起始帧（最后一个 note 则是 T）
+
+  3. 为这个 note 生成 token 序列
+
+  - 一定有 <BOW> 和 <EOW>
+  - 中间是 phoneme token：
+      - 中文常见 1 个
+      - 英文可能拆成多个，再加 <SEP>
+
+  设中间 token 数是 j。
+
+  4. 帧分配（关键）
+
+  - 中间帧从 k = i+1 开始，按长度 j 的块反复写：
+      - 一块写 [ph1, ph2, ..., phj]
+      - k += j
+      - 直到再写一整块会越过 next_i-1 为止
+
+  所以中间不是“按比例一次性切段”，而是“循环铺 token 块”。
+
+  5. 结果含义
+
+  - note 越长，中间循环次数越多
+  - j 越大（一个 note 内 token 越多），每个 token 平均占帧越少
+  - 每个 note 首尾被 <BOW>/<EOW>占用两帧（如果 note 太短，会被边界 token 强影响）
+
+  - note 有 10 帧，中间 token [A,B,C]（j=3）
+  - 分配可能是：<BOW>, A,B,C, A,B,C, A,B, <EOW>
+    （最后不够 3 帧时就不再写完整块，尾帧给 <EOW>）
