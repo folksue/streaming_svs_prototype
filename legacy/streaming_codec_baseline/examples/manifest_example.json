@@ -1,0 +1,19 @@
+[
+  {
+    "utt_id": "song001_phrase0001",
+    "audio_path": "wav/song001_phrase0001.wav",
+    "phoneme_ids": [12, 45, 78, 9],
+    "phoneme_intervals": [
+      [0.00, 0.12],
+      [0.12, 0.32],
+      [0.32, 0.58],
+      [0.58, 0.90]
+    ],
+    "note_pitch_midi": [60, 62, 64],
+    "note_intervals": [
+      [0.00, 0.30],
+      [0.30, 0.60],
+      [0.60, 0.90]
+    ]
+  }
+]

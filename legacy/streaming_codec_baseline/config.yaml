@@ -1,0 +1,62 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  chunk_ms: 100
+  encodec_model_name: facebook/encodec_24khz
+
+data:
+  train_manifest: artifacts/data/train_manifest.json
+  valid_manifest: artifacts/data/valid_manifest.json
+  manifest_adapter: manifest
+  train_manifest_adapter: manifest
+  valid_manifest_adapter: manifest
+  train_audio_root: null
+  valid_audio_root: null
+  auto_split_valid: false
+  valid_ratio: 0.05
+  min_valid_items: 1
+  phoneme_vocab_path: artifacts/data/phoneme_vocab.json
+  train_cache: artifacts/data/train_chunks.pt
+  valid_cache: artifacts/data/valid_chunks.pt
+  batch_size: 4
+  num_workers: 2
+  max_seq_len: 256
+
+model:
+  note_vocab_size: 256
+  note_emb_dim: 128
+  phoneme_vocab_size: 256
+  phoneme_emb_dim: 128
+  slur_emb_dim: 16
+  phone_progress_bins: 8
+  phone_progress_emb_dim: 32
+  cond_dim: 256
+  token_emb_dim: 128
+  prev_chunk_dim: 256
+  model_dim: 512
+  attn_heads: 8
+  attn_layers: 4
+  history_window: 8
+  num_blocks: 6
+
+train:
+  epochs: 80
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+
+logging:
+  backends: ["console"]
+  tensorboard_dir: artifacts/runs/default
+  wandb_project: streaming-svs
+  run_name: null
+  wandb_mode: online
+
+paths:
+  checkpoints: artifacts/checkpoints
+  outputs: artifacts/outputs
