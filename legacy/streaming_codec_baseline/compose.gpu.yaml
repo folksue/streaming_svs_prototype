@@ -1,0 +1,12 @@
+services:
+  legacy-gpu:
+    image: legacy-svs:gpu
+    build:
+      context: ../..
+      dockerfile: legacy/streaming_codec_baseline/Dockerfile.gpu
+    working_dir: /workspace/streaming_svs_prototype/legacy/streaming_codec_baseline
+    gpus: all
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./:/workspace/streaming_svs_prototype/legacy/streaming_codec_baseline

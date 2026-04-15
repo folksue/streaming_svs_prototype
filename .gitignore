@@ -4,8 +4,12 @@ __pycache__/
 *.pyd
 .env
 .venv/
+.paper_note_venv/
+.venv_pdf/
 venv/
+legacy/streaming_codec_baseline/.venv_smoke/
 artifacts/
 datasets/
+third_party/
 *.log
 .DS_Store

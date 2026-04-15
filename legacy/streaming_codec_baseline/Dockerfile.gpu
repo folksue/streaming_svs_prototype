@@ -1,0 +1,31 @@
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/streaming_svs_prototype/legacy/streaming_codec_baseline
+
+# Copy only the legacy baseline source into the image.
+# Dataset manifests, wavs, caches and checkpoints are expected to be mounted at runtime.
+COPY legacy/streaming_codec_baseline/ ./
+
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --index-url https://download.pytorch.org/whl/cu124 torchaudio==2.5.1 && \
+    python -m pip install \
+      transformers>=4.39 \
+      soundfile>=0.12 \
+      numpy>=1.24 \
+      PyYAML>=6.0 \
+      tqdm>=4.66 \
+      matplotlib>=3.8 \
+      tensorboard>=2.16 \
+      wandb>=0.18
+
+CMD ["bash"]

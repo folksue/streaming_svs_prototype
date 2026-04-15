@@ -39,6 +39,12 @@ Research prototype for chunk-wise streaming singing synthesis.
 - `artifacts/`：缓存、检查点、训练日志与推理输出
 - `config.yaml`: experiment config
 - `config.yaml`：实验配置
+- `Dockerfile.gpu`: GPU training/inference image
+- `Dockerfile.gpu`：GPU 训练/推理镜像
+- `compose.gpu.yaml`: GPU compose launcher
+- `compose.gpu.yaml`：GPU compose 启动配置
+- `DOCKER.md`: container build/run notes
+- `DOCKER.md`：容器构建与运行说明
 - `examples/manifest_example.json`: sample manifest schema
 - `examples/manifest_example.json`：样例 manifest 格式
 
