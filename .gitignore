@@ -8,6 +8,8 @@ __pycache__/
 .venv_pdf/
 venv/
 legacy/streaming_codec_baseline/.venv_smoke/
+legacy/streaming_codec_baseline/.venv_smoke2/
+legacy/streaming_codec_baseline/artifacts_smoke/
 artifacts/
 datasets/
 third_party/

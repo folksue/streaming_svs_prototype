@@ -1,0 +1,63 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  tokens_per_step: 4
+  encodec_model_name: facebook/encodec_24khz
+
+data:
+  train_manifest: examples/opencpop_smoke_train.txt
+  valid_manifest: examples/opencpop_smoke_valid.txt
+  manifest_adapter: opencpop
+  train_manifest_adapter: opencpop
+  valid_manifest_adapter: opencpop
+  train_audio_root: /mnt/c/streaming_svs_prototype/datasets/opencpop/segments/wavs
+  valid_audio_root: /mnt/c/streaming_svs_prototype/datasets/opencpop/segments/wavs
+  auto_split_valid: false
+  valid_ratio: 0.05
+  min_valid_items: 1
+  phoneme_vocab_path: artifacts_smoke/data/phoneme_vocab.json
+  train_cache: artifacts_smoke/data/train_steps.pt
+  valid_cache: artifacts_smoke/data/valid_steps.pt
+  batch_size: 1
+  num_workers: 0
+  max_seq_len: 16
+
+model:
+  note_vocab_size: 256
+  note_emb_dim: 64
+  phoneme_vocab_size: 256
+  phoneme_emb_dim: 64
+  slur_emb_dim: 8
+  phone_progress_bins: 8
+  phone_progress_emb_dim: 16
+  cond_dim: 128
+  token_emb_dim: 64
+  prev_step_dim: 128
+  model_dim: 128
+  attn_heads: 4
+  attn_layers: 2
+  history_window: 8
+  num_blocks: 2
+  audio_history_window: 8
+
+train:
+  epochs: 1
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1
+  use_amp: false
+  log_interval: 1
+  val_interval: 1
+
+logging:
+  backends: ["console"]
+  tensorboard_dir: artifacts_smoke/runs/default
+  wandb_project: streaming-svs
+  run_name: smoke
+  wandb_mode: offline
+
+paths:
+  checkpoints: artifacts_smoke/checkpoints
+  outputs: artifacts_smoke/outputs
