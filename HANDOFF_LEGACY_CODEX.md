@@ -1,303 +1,292 @@
 # Legacy Streaming SVS Handoff
 
-This file is a handoff summary for continuing work on:
+This handoff is for continuing work on:
 
-- `legacy/streaming_codec_baseline`
+- [legacy/streaming_codec_baseline](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline)
 
-It is intended for a fresh Codex / server-side coding session.
+It reflects the current state after the step-level refactor and smoke-test validation.
 
 ## Scope
 
-The current work is **not** about the `qwen3_8b_singing` route.
+This is **not** the `qwen3_8b_singing` route.
 
-The active target is:
+The active target is still the legacy EnCodec baseline, but it is no longer chunk-semantic. The current line is:
 
-- the legacy EnCodec chunk-based baseline
+- EnCodec discrete codec tokens
+- explicit symbolic control
+- step-level local/sliding causal attention
+- main-codebook autoregression with residual parallel heads
 
-The immediate goal was:
+## Current Design
 
-- keep the existing chunk-based local-attention baseline
-- replace the old mixed numeric control input with a simpler explicit control schema
-- add GPU Docker packaging for this legacy baseline
+The legacy path now treats each training unit as a **step**, not a chunk.
 
-## Current Design Decision
+Per step:
 
-Do **not** make the legacy path learn duration or shift.
+- one control state
+- one grouped audio target of `tokens_per_step` consecutive EnCodec frames
 
-Instead:
+The grouping hyperparameter is:
 
-- explicit control is generated rule-based from aligned labels
-- the model only learns `control -> codec token prediction`
-- chunk history only handles short-range continuity
+- `audio.tokens_per_step`
 
-## New Legacy V1 Control Schema
+This is only an engineering grouping factor. It replaces the old chunk packaging role, but it is **not** a semantic chunk boundary in the model.
 
-The old legacy condition was:
+## Current Control Schema
 
-- `phoneme_id + cond_num[7]`
-
-This has been replaced by four discrete controls:
+The active v1 control set is:
 
 - `NOTE`
 - `PHONEME`
 - `SLUR`
 - `PHONE_PROGRESS`
 
-Concrete cache fields are now:
+Concrete cache fields:
 
 - `note_id`
 - `phoneme_id`
 - `slur`
 - `phone_progress`
+- `note_on_boundary`
+- `note_off_boundary`
 
-We intentionally do **not** use `NOTE_PROGRESS` in v1.
+We still do **not** use `NOTE_PROGRESS`.
 
 Reason:
 
-- OpenCpop `segments` is already flattened as `1 phoneme <-> 1 note`
-- if one phoneme spans multiple notes, the dataset duplicates the phoneme and uses `slur=1`
-- therefore `NOTE + PHONEME + SLUR + PHONE_PROGRESS` is the smallest useful control set for legacy v1
+- for the current OpenCpop-style flattened supervision, `SLUR + NOTE + PHONEME + PHONE_PROGRESS` is the smallest useful set
 
-## Important Behavioral Choice
+## Current Model Behavior
 
-The legacy model remains:
+The old outer chunk-history mechanism has been removed.
 
-- chunk-based
-- local-causal over chunk history
-- parallel classifier over all `(frame, codebook)` slots in the chunk
+The current model is:
 
-It is **not**:
+- step-level local causal attention over explicit control + previous-step summary
+- within each step:
+  - `codebook 0` is decoded sequentially
+  - `codebook 1..K-1` are predicted by parallel residual heads
 
-- decoder-only interleaved-token training
-- codebook autoregressive
-- coarse-to-fine multi-codebook decoding
+So the current decoding protocol is:
 
-Current multi-codebook behavior is still:
+- **not** full flatten-all-codebooks autoregression
+- **not** delay pattern
+- **not** fully parallel all-codebook prediction
 
-- predict all codebooks in parallel inside each chunk
+It is:
 
-## Files Changed
+- **main codebook AR + same-step residual parallel heads**
 
-### Core implementation
+This choice is intentional because the model has strong per-step control inputs, and delay scheduling would misalign control with finer codebooks from shifted time positions.
 
-- [legacy/streaming_codec_baseline/preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
-- [legacy/streaming_codec_baseline/metadata_adapters.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/metadata_adapters.py)
-- [legacy/streaming_codec_baseline/model.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/model.py)
-- [legacy/streaming_codec_baseline/dataset.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/dataset.py)
-- [legacy/streaming_codec_baseline/train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/train.py)
-- [legacy/streaming_codec_baseline/infer.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/infer.py)
-- [legacy/streaming_codec_baseline/config.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/config.yaml)
+## Cache Format
 
-### Documentation
-
-- [legacy/streaming_codec_baseline/CONTROL_PROTOCOL_V1.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/CONTROL_PROTOCOL_V1.md)
-- [legacy/streaming_codec_baseline/LEGACY_ALIGNMENT_CONDITIONING_DRAFT.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/LEGACY_ALIGNMENT_CONDITIONING_DRAFT.md)
-- [legacy/streaming_codec_baseline/README.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/README.md)
-
-### Docker
-
-- [legacy/streaming_codec_baseline/Dockerfile.gpu](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/Dockerfile.gpu)
-- [legacy/streaming_codec_baseline/compose.gpu.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/compose.gpu.yaml)
-- [legacy/streaming_codec_baseline/.dockerignore](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/.dockerignore)
-- [legacy/streaming_codec_baseline/DOCKER.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/DOCKER.md)
-
-## What Preprocess Now Does
-
-For each chunk center time, preprocess extracts:
-
-1. `note_id`
-   - integerized MIDI pitch
-   - `0` reserved for rest / inactive note
-
-2. `phoneme_id`
-   - from phoneme vocabulary
-
-3. `slur`
-   - for OpenCpop, directly from official metadata
-   - for datasets without slur, current fallback is all zeros
-
-4. `phone_progress`
-   - bucketized progress inside current phoneme
-   - controlled by `model.phone_progress_bins`
-
-Boundary diagnostics are still kept:
-
-- `note_on_boundary`
-- `note_off_boundary`
-
-## Cache Format Change
-
-Cache format version was bumped.
+Cache format has changed again and old caches are invalid.
 
 Current values:
 
-- `CACHE_FORMAT = "svs_chunk_codes"`
-- `CACHE_FORMAT_VERSION = 2`
+- `CACHE_FORMAT = "svs_step_codes"`
+- `CACHE_FORMAT_VERSION = 3`
 
 This means:
 
-- old caches built with the previous `cond_num[7]` format are no longer compatible
-- preprocess must be rerun
+- any earlier chunk-based cache must be regenerated
 
-## Dataset / Model Expectations
+## What “Regenerate Cache” Means
 
-Current training/inference expects cache items to contain:
+It means rerunning:
 
-- `codes`
-- `note_id`
-- `phoneme_id`
-- `slur`
-- `phone_progress`
-- `note_on_boundary`
-- `note_off_boundary`
+- [preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
 
-The condition encoder is now fully discrete:
+to rebuild:
 
-- note embedding
-- phoneme embedding
-- slur embedding
-- phone-progress embedding
+- train cache
+- valid cache
 
-then projected to `cond_dim`
+with the new step-based schema.
 
-## Current Model Structure
+Old chunk-based `.pt` cache files are not compatible with the new code.
 
-The current model is still a relatively small chunk model:
+## Files Most Relevant Now
 
-- `model_dim=512`
-- `attn_layers=4`
-- `attn_heads=8`
-- `num_blocks=6`
-- `history_window=8`
+Core implementation:
 
-This is not a several-hundred-million-parameter model.
+- [preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
+- [metadata_adapters.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/metadata_adapters.py)
+- [dataset.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/dataset.py)
+- [model.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/model.py)
+- [train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/train.py)
+- [infer.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/infer.py)
+- [config.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/config.yaml)
+- [resume_soulx_train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/resume_soulx_train.py)
+- [soulx_train_config.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/soulx_train_config.yaml)
 
-It is still a lightweight legacy baseline.
+Current architecture note:
 
-## OpenCpop Conclusions Used Here
+- [ARCHITECTURE_NOTE.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/ARCHITECTURE_NOTE.md)
 
-Important dataset interpretation that drove the control design:
+Smoke config:
 
-- `segments/train.txt` is flattened
-- each flattened position corresponds to one `phoneme` and one `note`
-- if a phoneme continues across notes, OpenCpop duplicates the phoneme and uses `slur=1`
+- [examples/config_smoke.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/config_smoke.yaml)
+- [examples/opencpop_smoke_train.txt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/opencpop_smoke_train.txt)
+- [examples/opencpop_smoke_valid.txt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/opencpop_smoke_valid.txt)
 
-That is the reason `NOTE_PROGRESS` was dropped from legacy v1.
+## Important Bug Fix Included
 
-## Docker Packaging Decision
+OpenCpop note parsing needed a compatibility fix for note spellings like:
 
-The Docker setup is for **GPU** training/inference.
+- `G#4/Ab4`
+
+This was fixed in:
+
+- [metadata_adapters.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/metadata_adapters.py)
+
+The parser now splits on `/` and uses the first spelling before converting to MIDI.
+
+## Current Training / Inference Semantics
+
+### Training
+
+- data is stored as step sequences
+- local causal attention is applied directly during training
+- there is no special extra “simulate truncation” branch
+- the training-time attention constraint is already the same local-window assumption used by inference
+
+### Inference
+
+- continuous step-by-step generation
+- one control state per step
+- same sliding/local context rule as training
+- EnCodec wav decoding can still be invoked step-by-step at script level
+
+## Smoke Test Status
+
+This has already been validated locally on CPU.
+
+Environment used:
+
+- temporary venv at `/tmp/legacy_svs_smoke`
+
+Verified dependencies:
+
+- `torch 2.11.0+cpu`
+- `torchaudio 2.11.0+cpu`
+- `transformers 5.5.4`
+- `soundfile`
+- `numpy`
+
+### Smoke preprocess
+
+Command:
+
+```bash
+cd /mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline
+/tmp/legacy_svs_smoke/bin/python preprocess_encodec.py --config examples/config_smoke.yaml --split both
+```
+
+Result:
+
+- succeeded
+- wrote:
+  - [train_steps.pt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/artifacts_smoke/data/train_steps.pt)
+  - [valid_steps.pt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/artifacts_smoke/data/valid_steps.pt)
+
+### Smoke train
+
+Command:
+
+```bash
+cd /mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline
+/tmp/legacy_svs_smoke/bin/python train.py --config examples/config_smoke.yaml
+```
+
+Result:
+
+- succeeded
+- tiny smoke model trained for one epoch
+- reported:
+  - `Model params: 1.32M`
+  - final validation metrics were emitted without shape/runtime failure
+
+This is enough to say:
+
+- preprocess works
+- new cache schema works
+- training forward/backward works
+- the step-level refactor is not broken at basic runtime level
+
+## Logging
+
+There is already a metric logger abstraction in:
+
+- [logging_utils.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/logging_utils.py)
+
+Supported backends:
+
+- `console`
+- `tensorboard`
+- `wandb`
+
+Practical recommendation for this stage:
+
+- use `console + tensorboard`
+- `wandb` is optional and not required yet
+
+## Docker
+
+GPU Docker packaging already exists for the legacy baseline:
+
+- [Dockerfile.gpu](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/Dockerfile.gpu)
+- [compose.gpu.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/compose.gpu.yaml)
+- [DOCKER.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/DOCKER.md)
 
 It packages:
 
-- the legacy baseline source code
+- the legacy baseline source
 
 It does **not** package by default:
 
-- the entire repository
 - datasets
 - generated caches
 - checkpoints
 
-Those are expected to be mounted from host.
+Those are still expected to be mounted from host.
 
-Build:
+## Git Commits Relevant to This Work
 
-```bash
-docker build -f legacy/streaming_codec_baseline/Dockerfile.gpu -t legacy-svs:gpu .
-```
-
-Run:
-
-```bash
-docker compose -f legacy/streaming_codec_baseline/compose.gpu.yaml run --rm legacy-gpu
-```
-
-## Git State
-
-Two commits were created and pushed:
+Already on remote `main`:
 
 - `0e07119` `legacy: switch chunk conditioning to explicit note/phoneme controls`
 - `6e1f02f` `legacy: document control protocol v1`
+- `4c212d9` `legacy: add gpu docker packaging and handoff docs`
+- `8525c3b` `legacy: switch codec baseline to step-level decoding`
+- `088b10e` `legacy: add step smoke config and notes`
 
-At the time of writing, Docker files and the new legacy draft were added **after** those pushed commits and may still require an additional commit/push depending on repository state.
+## What Is Still Outdated
 
-Check with:
+Some docs still describe the old chunk-based behavior and need refresh if they are going to be used as source-of-truth:
 
-```bash
-git status
-git log --oneline -5
-```
+- [README.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/README.md)
+- [CONTROL_PROTOCOL_V1.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/CONTROL_PROTOCOL_V1.md)
+- [LEGACY_ALIGNMENT_CONDITIONING_DRAFT.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/LEGACY_ALIGNMENT_CONDITIONING_DRAFT.md)
 
-## Important Repo Hygiene Notes
-
-The repository root is dirty with many unrelated changes.
-
-Do not blindly commit everything.
-
-Only touch / stage files that are actually part of the current task.
-
-Known local-only ignore additions:
-
-- `.paper_note_venv/`
-- `legacy/streaming_codec_baseline/.venv_smoke/`
-
-`note.md` and `questions.md` were intentionally left trackable.
-
-## Smoke Test Status
-
-Python syntax check already passed for the modified legacy files.
-
-What has **not** been completed yet:
-
-- full preprocess rerun with the new cache schema
-- training smoke test with the new cache
-- end-to-end inference verification on the updated cache
-
-There was an attempt to build a small local venv for smoke testing:
-
-- `legacy/streaming_codec_baseline/.venv_smoke/`
-
-but this was only for local CPU testing and is not part of the intended production path.
+The code is current; those docs are not fully current.
 
 ## Recommended Next Steps
 
-1. Rebuild caches with the new preprocess schema:
+If continuing the legacy line:
 
-```bash
-python preprocess_encodec.py --config config.yaml --split both
-```
+1. decide whether to keep the current:
+   - `codebook0 AR + residual parallel heads`
+   or move to:
+   - stronger RVQ-style residual decoding
+2. add a cleaner experiment matrix for:
+   - current residual-head baseline
+   - delay pattern baseline if still desired
+   - future XY-tokenizer / Qwen route comparisons
+3. refresh stale docs so they match the step-level model
 
-2. Run a minimal train smoke test:
+If pivoting toward the future Qwen route:
 
-```bash
-python train.py --config config.yaml
-```
-
-3. Verify inference reads the new cache format:
-
-```bash
-python infer.py \
-  --checkpoint artifacts/checkpoints/best.pt \
-  --cache artifacts/data/valid_chunks.pt \
-  --index 0 \
-  --temperature 0.0
-```
-
-4. Only after that, decide whether to change:
-
-- chunk size
-- `phone_progress_bins`
-- multi-codebook prediction order
-
-## What Not To Do Next
-
-Do not immediately:
-
-- turn legacy into decoder-only interleaved-token training
-- add `NOTE_PROGRESS` before validating v1
-- redesign multi-codebook decoding before validating the new control schema
-
-The highest-value next validation is simply:
-
-- does the new explicit control schema outperform or stabilize the old `cond_num[7]` baseline?
+- keep this legacy path as a validated EnCodec baseline
+- do not mix the legacy step-baseline refactor with the future XY/Qwen architecture in one branch of reasoning
