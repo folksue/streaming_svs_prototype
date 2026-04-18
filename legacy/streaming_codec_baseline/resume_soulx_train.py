@@ -27,9 +27,10 @@ def main() -> None:
     valid_set = SVSSequenceDataset(cfg["data"]["valid_cache"], max_seq_len=cfg["data"]["max_seq_len"])
 
     num_codebooks = int(train_set.meta["num_codebooks"])
-    frames_per_chunk = int(train_set.meta["frames_per_chunk"])
+    tokens_per_step = int(train_set.meta["tokens_per_step"])
     codebook_size = int(train_set.meta["codebook_size"])
-    model = build_model(cfg, num_codebooks, frames_per_chunk, codebook_size).to(dev)
+    cfg["_runtime_max_note_id"] = int(train_set.meta.get("max_note_id", 0))
+    model = build_model(cfg, num_codebooks, tokens_per_step, codebook_size).to(dev)
 
     train_loader = DataLoader(
         train_set,

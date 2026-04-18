@@ -38,12 +38,12 @@ class EncodecDecoder:
     @torch.inference_mode()
     def decode_chunk(self, chunk_codes: torch.Tensor) -> torch.Tensor:
         """
-        Decode one generated chunk [F, K] to waveform.
+        Decode one generated step [S, K] to waveform.
 
         Note:
-        This uses chunk-wise decode calls on top of the pretrained EnCodec decoder.
+        This uses step-wise decode calls on top of the pretrained EnCodec decoder.
         It is streaming-style at the inference script level, but does not keep an
-        explicit persistent decoder state between chunks.
+        explicit persistent decoder state between steps.
         """
         return self.decode_from_codes(chunk_codes)
 
@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--decode_wav", action="store_true")
-    p.add_argument("--save_chunk_wavs", action="store_true")
+    p.add_argument("--save_step_wavs", action="store_true")
     p.add_argument("--out_dir", type=str, default="outputs")
     return p.parse_args()
 
@@ -67,7 +67,7 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
 
     model = StreamingSVSModel(
         num_codebooks=int(meta["num_codebooks"]),
-        frames_per_chunk=int(meta["frames_per_chunk"]),
+        tokens_per_step=int(meta["tokens_per_step"]),
         codebook_size=int(meta["codebook_size"]),
         note_vocab_size=note_vocab_size,
         phoneme_vocab_size=cfg["phoneme_vocab_size"],
@@ -78,12 +78,13 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
         phone_progress_emb_dim=cfg["phone_progress_emb_dim"],
         cond_dim=cfg["cond_dim"],
         token_emb_dim=cfg.get("token_emb_dim", 128),
-        prev_chunk_dim=cfg.get("prev_chunk_dim", 256),
+        prev_step_dim=cfg.get("prev_step_dim", 256),
         model_dim=cfg["model_dim"],
         attn_heads=cfg.get("attn_heads", 8),
         attn_layers=cfg.get("attn_layers", 4),
         history_window=cfg.get("history_window", 8),
         num_blocks=cfg["num_blocks"],
+        audio_history_window=cfg.get("audio_history_window", 64),
     ).to(dev)
     model.load_state_dict(ckpt["model"], strict=True)
     model.eval()
@@ -111,8 +112,8 @@ def main() -> None:
     mask = torch.ones(1, codes_gt.size(1), device=dev)
 
     decoder = None
-    stream_wav_chunks = []
-    pred_chunks = []
+    stream_wav_steps = []
+    pred_steps = []
     if args.decode_wav:
         decoder = EncodecDecoder(
             model_name=ckpt["config"]["audio"]["encodec_model_name"],
@@ -120,7 +121,7 @@ def main() -> None:
         )
 
     with torch.no_grad():
-        for chunk_idx, chunk_codes in enumerate(
+        for step_idx, step_codes in enumerate(
             model.generate_stream(
                 note_id=note_id,
                 phoneme_id=phoneme,
@@ -129,15 +130,15 @@ def main() -> None:
                 temperature=args.temperature,
             )
         ):
-            pred_chunks.append(chunk_codes)
+            pred_steps.append(step_codes)
             if decoder is not None:
-                chunk_wav = decoder.decode_chunk(chunk_codes.squeeze(0))
-                stream_wav_chunks.append(chunk_wav)
-                if args.save_chunk_wavs:
-                    chunk_path = os.path.join(args.out_dir, f"sample_{args.index:04d}_chunk_{chunk_idx:04d}.wav")
-                    sf.write(chunk_path, chunk_wav.numpy(), int(ckpt["config"]["audio"]["sample_rate"]))
+                step_wav = decoder.decode_chunk(step_codes.squeeze(0))
+                stream_wav_steps.append(step_wav)
+                if args.save_step_wavs:
+                    step_path = os.path.join(args.out_dir, f"sample_{args.index:04d}_step_{step_idx:04d}.wav")
+                    sf.write(step_path, step_wav.numpy(), int(ckpt["config"]["audio"]["sample_rate"]))
 
-    codes_pred = torch.stack(pred_chunks, dim=1)
+    codes_pred = torch.stack(pred_steps, dim=1)
 
     acc = masked_code_accuracy(codes_pred, codes_gt, mask)
     on_acc = masked_code_accuracy(codes_pred, codes_gt, on_b)
@@ -159,11 +160,11 @@ def main() -> None:
     )
 
     if args.decode_wav:
-        wav = torch.cat(stream_wav_chunks, dim=-1) if stream_wav_chunks else torch.empty(0)
+        wav = torch.cat(stream_wav_steps, dim=-1) if stream_wav_steps else torch.empty(0)
         out_wav = os.path.join(args.out_dir, f"sample_{args.index:04d}.wav")
         sf.write(out_wav, wav.numpy(), int(ckpt["config"]["audio"]["sample_rate"]))
         print(f"saved wav: {out_wav}")
-        print("note: wav was produced with chunk-wise decode calls for streaming-style inference.")
+        print("note: wav was produced with step-wise decode calls for streaming-style inference.")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ seed: 42
 
 audio:
   sample_rate: 24000
-  chunk_ms: 100
+  tokens_per_step: 8
   encodec_model_name: facebook/encodec_24khz
 
 data:
@@ -33,12 +33,13 @@ model:
   phone_progress_emb_dim: 32
   cond_dim: 256
   token_emb_dim: 128
-  prev_chunk_dim: 256
+  prev_step_dim: 256
   model_dim: 512
   attn_heads: 8
   attn_layers: 4
   history_window: 8
   num_blocks: 6
+  audio_history_window: 64
 
 train:
   epochs: 80

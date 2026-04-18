@@ -454,6 +454,8 @@ def note_to_midi(note: str) -> float:
     token = str(note).strip()
     if not token or token.lower() in {"rest", "sil", "sp", "pau"}:
         return 0.0
+    if "/" in token:
+        token = token.split("/", 1)[0].strip()
     try:
         return float(token)
     except ValueError:

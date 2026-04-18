@@ -19,14 +19,14 @@ from metadata_adapters import (
 )
 from utils import ensure_dir, get_device, load_yaml, normalize_config_paths, set_seed
 
-CACHE_FORMAT = "svs_chunk_codes"
-CACHE_FORMAT_VERSION = 2
+CACHE_FORMAT = "svs_step_codes"
+CACHE_FORMAT_VERSION = 3
 
 
 @dataclass
-class ChunkedItem:
+class StepItem:
     utt_id: str
-    codes: torch.Tensor           # [T, F, K]
+    codes: torch.Tensor           # [T, S, K]
     note_id: torch.Tensor         # [T]
     phoneme_id: torch.Tensor      # [T]
     slur: torch.Tensor            # [T]
@@ -113,6 +113,7 @@ def note_features(
     note_intervals: List[List[float]],
     note_pitch_midi: List[float],
     note_slur: List[int],
+    boundary_eps: float,
 ) -> Tuple[int, float, float, bool, bool, int]:
     idx = find_active_interval(t, note_intervals)
     if idx < 0:
@@ -122,7 +123,6 @@ def note_features(
     pitch = int(round(float(note_pitch_midi[idx])))
     slur = int(note_slur[idx]) if idx < len(note_slur) else 0
 
-    boundary_eps = 0.5 * 0.1  # half chunk at 100ms
     on_boundary = abs(t - s) <= boundary_eps
     off_boundary = abs(t - e) <= boundary_eps
     return pitch, s, e, on_boundary, off_boundary, slur
@@ -150,13 +150,13 @@ def phoneme_features(
     return int(phoneme_ids[idx]), bucketize_progress(prog, phone_progress_bins)
 
 
-def chunk_sequence(
+def step_sequence(
     utt: Dict[str, Any],
     code_frames: torch.Tensor,
-    chunk_ms: int,
+    tokens_per_step: int,
     phone_progress_bins: int,
-    frames_per_chunk: Optional[int] = None,
-) -> Optional[ChunkedItem]:
+    tokens_per_step_override: Optional[int] = None,
+) -> Optional[StepItem]:
     duration_sec = float(utt.get("duration", 0.0))
     if duration_sec <= 0:
         max_note = max((x[1] for x in utt["note_intervals"]), default=0.0)
@@ -168,14 +168,16 @@ def chunk_sequence(
         return None
 
     frame_rate = total_frames / duration_sec
-    if frames_per_chunk is None:
-        frames_per_chunk = max(1, int(round(frame_rate * (chunk_ms / 1000.0))))
+    if tokens_per_step_override is None:
+        tokens_per_step_override = max(1, int(tokens_per_step))
 
-    n_chunks = total_frames // frames_per_chunk
-    if n_chunks < 2:
+    n_steps = total_frames // tokens_per_step_override
+    if n_steps < 2:
         return None
 
-    codes = code_frames[: n_chunks * frames_per_chunk].view(n_chunks, frames_per_chunk, -1)
+    codes = code_frames[: n_steps * tokens_per_step_override].view(n_steps, tokens_per_step_override, -1)
+    step_duration_sec = tokens_per_step_override / frame_rate
+    boundary_eps = 0.5 * step_duration_sec
 
     note_ids = []
     phoneme_ids = []
@@ -184,9 +186,9 @@ def chunk_sequence(
     note_on_b = []
     note_off_b = []
 
-    for t_idx in range(n_chunks):
-        # Legacy v1 uses a single explicit control state per chunk, sampled at chunk center.
-        center_t = (t_idx + 0.5) * (chunk_ms / 1000.0)
+    for t_idx in range(n_steps):
+        start_frame = t_idx * tokens_per_step_override
+        center_t = (start_frame + 0.5 * tokens_per_step_override) / frame_rate
 
         ph_id, ph_prog = phoneme_features(
             center_t,
@@ -199,6 +201,7 @@ def chunk_sequence(
             utt["note_intervals"],
             utt["note_pitch_midi"],
             utt.get("note_slur", []),
+            boundary_eps=boundary_eps,
         )
 
         # note_id is the integerized MIDI pitch. 0 remains the shared rest/inactive note id.
@@ -209,7 +212,7 @@ def chunk_sequence(
         note_on_b.append(float(on_b))
         note_off_b.append(float(off_b))
 
-    return ChunkedItem(
+    return StepItem(
         utt_id=str(utt["utt_id"]),
         codes=codes.long(),
         note_id=torch.tensor(note_ids, dtype=torch.long),
@@ -240,36 +243,36 @@ def build_cache(
     entries: List[Dict[str, Any]],
     out_path: str,
     split_name: str,
-    frames_per_chunk_override: Optional[int] = None,
+    tokens_per_step_override: Optional[int] = None,
 ) -> Dict[str, int]:
     dev = get_device()
     encodec = FrozenEncodec(cfg["audio"]["encodec_model_name"], dev)
 
-    items: List[ChunkedItem] = []
-    resolved_frames_per_chunk: Optional[int] = frames_per_chunk_override
+    items: List[StepItem] = []
+    resolved_tokens_per_step: Optional[int] = tokens_per_step_override
 
     for utt in tqdm(entries, desc=f"preprocess {split_name}"):
         wav = load_audio(utt["audio_path"], cfg["audio"]["sample_rate"])
         code_frames = encodec.encode(wav, cfg["audio"]["sample_rate"])
-        item = chunk_sequence(
+        item = step_sequence(
             utt=utt,
             code_frames=code_frames,
-            chunk_ms=cfg["audio"]["chunk_ms"],
+            tokens_per_step=cfg["audio"]["tokens_per_step"],
             phone_progress_bins=cfg["model"]["phone_progress_bins"],
-            frames_per_chunk=resolved_frames_per_chunk,
+            tokens_per_step_override=resolved_tokens_per_step,
         )
         if item is None:
             continue
 
-        if resolved_frames_per_chunk is None:
-            resolved_frames_per_chunk = int(item.codes.size(1))
+        if resolved_tokens_per_step is None:
+            resolved_tokens_per_step = int(item.codes.size(1))
         items.append(item)
 
     if not items:
         raise RuntimeError(f"No usable items parsed for split={split_name}")
 
     num_codebooks = int(items[0].codes.size(-1))
-    frames_per_chunk = int(items[0].codes.size(1))
+    tokens_per_step = int(items[0].codes.size(1))
 
     payload = {
         "items": [
@@ -289,8 +292,7 @@ def build_cache(
             "cache_format": CACHE_FORMAT,
             "cache_format_version": CACHE_FORMAT_VERSION,
             "num_codebooks": num_codebooks,
-            "frames_per_chunk": frames_per_chunk,
-            "chunk_ms": cfg["audio"]["chunk_ms"],
+            "tokens_per_step": tokens_per_step,
             "encodec_model": cfg["audio"]["encodec_model_name"],
             "sample_rate": cfg["audio"]["sample_rate"],
             "codebook_size": encodec.codebook_size,
@@ -301,10 +303,10 @@ def build_cache(
 
     ensure_dir(os.path.dirname(out_path) or ".")
     torch.save(payload, out_path)
-    print(f"Saved cache: {out_path} | items={len(items)} | codebooks={num_codebooks} | F={frames_per_chunk}")
+    print(f"Saved cache: {out_path} | items={len(items)} | codebooks={num_codebooks} | S={tokens_per_step}")
     return {
         "num_codebooks": num_codebooks,
-        "frames_per_chunk": frames_per_chunk,
+        "tokens_per_step": tokens_per_step,
     }
 
 
@@ -422,15 +424,15 @@ def main() -> None:
         train_meta = build_cache(cfg, split_entries["train"], cache_path, split_name="train")
     if args.split in ("valid", "both"):
         _, cache_path, _, _ = get_split_paths(cfg, "valid")
-        frames_per_chunk_override = None
+        tokens_per_step_override = None
         if train_meta is not None:
-            frames_per_chunk_override = int(train_meta["frames_per_chunk"])
+            tokens_per_step_override = int(train_meta["tokens_per_step"])
         build_cache(
             cfg,
             split_entries["valid"],
             cache_path,
             split_name="valid",
-            frames_per_chunk_override=frames_per_chunk_override,
+            tokens_per_step_override=tokens_per_step_override,
         )
 
 

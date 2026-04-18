@@ -6,8 +6,8 @@ from typing import Dict, List
 import torch
 from torch.utils.data import Dataset
 
-CACHE_FORMAT = "svs_chunk_codes"
-SUPPORTED_CACHE_FORMAT_VERSION = 2
+CACHE_FORMAT = "svs_step_codes"
+SUPPORTED_CACHE_FORMAT_VERSION = 3
 
 
 @dataclass
@@ -140,9 +140,8 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         "cache_format": str,
         "cache_format_version": int,
         "num_codebooks": int,
-        "frames_per_chunk": int,
+        "tokens_per_step": int,
         "codebook_size": int,
-        "chunk_ms": int,
         "sample_rate": int,
         "phone_progress_bins": int,
         "max_note_id": int,
@@ -162,16 +161,16 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         raise ValueError(
             f"Unsupported cache format version in '{cache_path}': expected {SUPPORTED_CACHE_FORMAT_VERSION}, got {meta['cache_format_version']}."
         )
-    if meta["num_codebooks"] <= 0 or meta["frames_per_chunk"] <= 0 or meta["codebook_size"] <= 0:
+    if meta["num_codebooks"] <= 0 or meta["tokens_per_step"] <= 0 or meta["codebook_size"] <= 0:
         raise ValueError(
-            f"Invalid cache '{cache_path}': num_codebooks/frames_per_chunk/codebook_size must be positive."
+            f"Invalid cache '{cache_path}': num_codebooks/tokens_per_step/codebook_size must be positive."
         )
     if meta["phone_progress_bins"] <= 0:
         raise ValueError(
             f"Invalid cache '{cache_path}': phone_progress_bins must be positive."
         )
 
-    expected_f = int(meta["frames_per_chunk"])
+    expected_s = int(meta["tokens_per_step"])
     expected_k = int(meta["num_codebooks"])
     for idx, item in enumerate(items):
         if not isinstance(item, dict):
@@ -207,9 +206,9 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         t = codes.size(0)
         if t <= 0:
             raise ValueError(f"Invalid cache '{cache_path}': items[{idx}] has empty time dimension.")
-        if codes.size(1) != expected_f or codes.size(2) != expected_k:
+        if codes.size(1) != expected_s or codes.size(2) != expected_k:
             raise ValueError(
-                f"Invalid cache '{cache_path}': items[{idx}]['codes'] shape mismatch, expected [T,{expected_f},{expected_k}], got {tuple(codes.shape)}."
+                f"Invalid cache '{cache_path}': items[{idx}]['codes'] shape mismatch, expected [T,{expected_s},{expected_k}], got {tuple(codes.shape)}."
             )
         if (
             note_id.size(0) != t
@@ -233,7 +232,7 @@ def validate_cache_meta_compatibility(train_meta: Dict, valid_meta: Dict, train_
         "cache_format",
         "cache_format_version",
         "num_codebooks",
-        "frames_per_chunk",
+        "tokens_per_step",
         "codebook_size",
         "phone_progress_bins",
     )

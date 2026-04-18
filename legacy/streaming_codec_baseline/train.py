@@ -29,12 +29,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def build_model(cfg: dict, num_codebooks: int, frames_per_chunk: int, codebook_size: int) -> StreamingSVSModel:
+def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_size: int) -> StreamingSVSModel:
     m = cfg["model"]
     note_vocab_size = max(int(m["note_vocab_size"]), int(cfg["_runtime_max_note_id"]) + 1)
     return StreamingSVSModel(
         num_codebooks=num_codebooks,
-        frames_per_chunk=frames_per_chunk,
+        tokens_per_step=tokens_per_step,
         codebook_size=codebook_size,
         note_vocab_size=note_vocab_size,
         phoneme_vocab_size=m["phoneme_vocab_size"],
@@ -45,12 +45,13 @@ def build_model(cfg: dict, num_codebooks: int, frames_per_chunk: int, codebook_s
         phone_progress_emb_dim=m["phone_progress_emb_dim"],
         cond_dim=m["cond_dim"],
         token_emb_dim=m.get("token_emb_dim", 128),
-        prev_chunk_dim=m.get("prev_chunk_dim", 256),
+        prev_step_dim=m.get("prev_step_dim", 256),
         model_dim=m["model_dim"],
         attn_heads=m.get("attn_heads", 8),
         attn_layers=m.get("attn_layers", 4),
         history_window=m.get("history_window", 8),
         num_blocks=m["num_blocks"],
+        audio_history_window=m.get("audio_history_window", 64),
     )
 
 
@@ -195,11 +196,11 @@ def main() -> None:
     )
 
     num_codebooks = int(train_set.meta["num_codebooks"])
-    frames_per_chunk = int(train_set.meta["frames_per_chunk"])
+    tokens_per_step = int(train_set.meta["tokens_per_step"])
     codebook_size = int(train_set.meta["codebook_size"])
     cfg["_runtime_max_note_id"] = int(train_set.meta.get("max_note_id", 0))
 
-    model = build_model(cfg, num_codebooks, frames_per_chunk, codebook_size).to(dev)
+    model = build_model(cfg, num_codebooks, tokens_per_step, codebook_size).to(dev)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params / 1e6:.2f}M")
 
