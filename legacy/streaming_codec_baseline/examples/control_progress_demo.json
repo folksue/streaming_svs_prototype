@@ -1,0 +1,19 @@
+{
+  "utt_id": "demo_slur_progress",
+  "phoneme_symbols": ["sh", "i", "AP"],
+  "phoneme_intervals": [
+    [0.0, 0.24],
+    [0.24, 0.72],
+    [0.72, 0.88]
+  ],
+  "phoneme_ids": [11, 22, 3],
+  "note_pitch_midi": [60, 62, 62, 64],
+  "note_intervals": [
+    [0.0, 0.20],
+    [0.20, 0.40],
+    [0.40, 0.60],
+    [0.60, 0.88]
+  ],
+  "note_slur": [0, 0, 1, 0],
+  "duration": 0.88
+}

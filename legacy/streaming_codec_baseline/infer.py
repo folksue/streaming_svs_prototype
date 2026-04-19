@@ -85,6 +85,10 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
         history_window=cfg.get("history_window", 8),
         num_blocks=cfg["num_blocks"],
         audio_history_window=cfg.get("audio_history_window", 64),
+        ffn_mult=cfg.get("ffn_mult", 8.0 / 3.0),
+        attn_bias=cfg.get("attn_bias", False),
+        ffn_bias=cfg.get("ffn_bias", False),
+        norm_eps=cfg.get("norm_eps", 1e-6),
     ).to(dev)
     model.load_state_dict(ckpt["model"], strict=True)
     model.eval()

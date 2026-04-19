@@ -52,6 +52,10 @@ def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_si
         history_window=m.get("history_window", 8),
         num_blocks=m["num_blocks"],
         audio_history_window=m.get("audio_history_window", 64),
+        ffn_mult=m.get("ffn_mult", 8.0 / 3.0),
+        attn_bias=m.get("attn_bias", False),
+        ffn_bias=m.get("ffn_bias", False),
+        norm_eps=m.get("norm_eps", 1e-6),
     )
 
 

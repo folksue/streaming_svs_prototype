@@ -4,6 +4,31 @@ import torch
 import torch.nn as nn
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_fp32 = x.float()
+        rms = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+        x_norm = x_fp32 * torch.rsqrt(rms + self.eps)
+        return (x_norm.type_as(x)) * self.weight
+
+
+class SwiGLUFeedForward(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int, bias: bool = False):
+        super().__init__()
+        self.gate_proj = nn.Linear(dim, hidden_dim, bias=bias)
+        self.up_proj = nn.Linear(dim, hidden_dim, bias=bias)
+        self.down_proj = nn.Linear(hidden_dim, dim, bias=bias)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))
+
+
 class ConditionEncoder(nn.Module):
     """
     Discrete note/phoneme/slur/phone-progress -> condition embedding.
@@ -48,17 +73,21 @@ class ConditionEncoder(nn.Module):
 
 
 class LocalCausalSelfAttentionBlock(nn.Module):
-    def __init__(self, dim: int, num_heads: int, hidden_mult: int = 4):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        ffn_mult: float = 8.0 / 3.0,
+        attn_bias: bool = False,
+        ffn_bias: bool = False,
+        norm_eps: float = 1e-6,
+    ):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        hidden = dim * hidden_mult
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, dim),
-        )
+        self.norm1 = RMSNorm(dim, eps=norm_eps)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, bias=attn_bias)
+        self.norm2 = RMSNorm(dim, eps=norm_eps)
+        hidden = int(dim * ffn_mult)
+        self.ffn = SwiGLUFeedForward(dim, hidden_dim=hidden, bias=ffn_bias)
 
     def forward(
         self,
@@ -102,6 +131,10 @@ class StreamingSVSModel(nn.Module):
         history_window: int,
         num_blocks: int,
         audio_history_window: int = 64,
+        ffn_mult: float = 8.0 / 3.0,
+        attn_bias: bool = False,
+        ffn_bias: bool = False,
+        norm_eps: float = 1e-6,
     ):
         super().__init__()
         self.num_codebooks = num_codebooks
@@ -135,7 +168,14 @@ class StreamingSVSModel(nn.Module):
         )
         self.context_blocks = nn.ModuleList(
             [
-                LocalCausalSelfAttentionBlock(model_dim, num_heads=attn_heads, hidden_mult=4)
+                LocalCausalSelfAttentionBlock(
+                    model_dim,
+                    num_heads=attn_heads,
+                    ffn_mult=ffn_mult,
+                    attn_bias=attn_bias,
+                    ffn_bias=ffn_bias,
+                    norm_eps=norm_eps,
+                )
                 for _ in range(attn_layers)
             ]
         )
@@ -144,7 +184,14 @@ class StreamingSVSModel(nn.Module):
         self.frame_pos_emb = nn.Parameter(torch.randn(self.audio_seq_len, model_dim) * 0.02)
         self.audio_blocks = nn.ModuleList(
             [
-                LocalCausalSelfAttentionBlock(model_dim, num_heads=attn_heads, hidden_mult=4)
+                LocalCausalSelfAttentionBlock(
+                    model_dim,
+                    num_heads=attn_heads,
+                    ffn_mult=ffn_mult,
+                    attn_bias=attn_bias,
+                    ffn_bias=ffn_bias,
+                    norm_eps=norm_eps,
+                )
                 for _ in range(num_blocks)
             ]
         )

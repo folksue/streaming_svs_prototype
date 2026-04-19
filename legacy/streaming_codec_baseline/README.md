@@ -9,8 +9,8 @@ Research prototype for chunk-wise streaming singing synthesis.
 - **声学空间**：使用冻结的预训练 EnCodec 离散码（离线预处理）
 - **Chunking**: default 100 ms
 - **分块方式**：默认 100 ms
-- **Inputs**: phoneme IDs + note/pitch/timing/progress features
-- **输入条件**：音素 ID + 音符/音高/时序/进度特征
+- **Inputs**: phoneme IDs + note/pitch/slur + integer phone-progress bucket features
+- **输入条件**：音素 ID + 音符/音高/slur + 整数化的音素进度桶特征
 - **Streaming context**: previous-chunk token embedding summary
 - **流式上下文**：上一分块 token 嵌入摘要
 - **Generator**: chunk-local residual classifier over frame/codebook slots
@@ -66,8 +66,8 @@ This section describes the exact model currently implemented in `model.py`.
   - `F`: EnCodec frames per chunk / 每分块的 EnCodec 帧数
   - `K`: number of EnCodec codebooks / EnCodec codebook 数量
 
-Training objective is next-chunk token classification for all `(F, K)` slots at each chunk.
-训练目标是在每个分块上对所有 `(F, K)` 槽位做下一分块 token 分类。
+Training objective is autoregressive next-token prediction over the flattened chunk audio sequence.
+训练目标是在展平后的 chunk 音频序列上做自回归下一 token 预测。
 
 ### 2) Condition encoder / 条件编码器
 - `note_id` -> embedding via `nn.Embedding(note_vocab_size, note_emb_dim)`
@@ -95,16 +95,18 @@ Training objective is next-chunk token classification for all `(F, K)` slots at 
 - 训练时 Teacher Forcing 采用带可学习 `bos_chunk` 的右移：
   - `prev_repr[:, 0] = bos_chunk`, `prev_repr[:, t] = chunk_repr[:, t-1]`
 
-### 4) Chunk predictor (classifier backbone) / 分块预测器（分类骨干）
+### 4) Chunk audio decoder / 分块音频解码器
 - Fuse condition and previous-chunk context:
 - 融合条件与上一分块上下文：
-  - `fuse([cond, prev_repr]) -> h`, shape `[B, T, model_dim]`
-- Expand to per-slot states with learnable slot embeddings:
-- 用可学习 slot embedding 扩展到每个槽位状态：
-  - slot embedding parameter: `[F, K, model_dim]`
-  - broadcast add -> `[B, T, F, K, model_dim]`
-- Pass through `num_blocks` residual FFN blocks (`LayerNorm + MLP + residual`)
-- 经过 `num_blocks` 个残差 FFN 块（`LayerNorm + MLP + residual`）
+  - `chunk_in([cond, prev_repr]) -> h`, shape `[B, T, model_dim]`
+- Flatten one chunk from `[F, K]` to `[F*K]`
+- 将一个 chunk 从 `[F, K]` 展平到 `[F*K]`
+- Use shifted-right audio token embeddings with learned `audio_bos`
+- 使用带可学习 `audio_bos` 的右移音频 token embedding
+- Add slot position embeddings for the flattened chunk token order
+- 为展平后的 chunk token 顺序加入位置 embedding
+- Run local-causal decoder-only self-attention over chunk audio tokens
+- 在 chunk 内音频 token 序列上运行局部因果 decoder-only 自注意力
 - Final linear classifier over codebook vocabulary:
 - 最后线性分类到 codebook 词表：
   - logits: `[B, T, F, K, codebook_size]`
@@ -122,16 +124,14 @@ Training objective is next-chunk token classification for all `(F, K)` slots at 
 - 用 `bos_chunk` 初始化上一分块上下文
 - For each chunk `t`:
 - 对每个分块 `t`：
-  - compute logits for current chunk slots `[F, K, V]`
-  - 计算当前分块槽位 logits `[F, K, V]`
-  - decode
-  - 解码方式
-    - greedy if `temperature <= 0`
-    - `temperature <= 0` 时贪心解码
-    - categorical sampling if `temperature > 0`
-    - `temperature > 0` 时按分类分布采样
-  - re-encode predicted chunk to update previous context for next step
-  - 将预测分块重新编码，更新下一步所需上下文
+  - compute current chunk context from explicit control + previous chunk history
+  - 先由显式控制和上一分块历史得到当前 chunk context
+  - decode the flattened chunk audio sequence autoregressively
+  - 再在展平后的 chunk 音频序列上做 decoder-only 自回归解码
+  - slot order is frame-major, then codebook-major inside each frame
+  - 槽位顺序为 frame 优先，同一 frame 内按 codebook 索引递增
+  - re-encode predicted chunk to update previous context for next chunk
+  - 将预测分块重新编码，更新下一分块所需上下文
 - Output predicted codes: `[B, T, F, K]`
 - 输出预测码：`[B, T, F, K]`
 - In the current inference script, generation is performed chunk-by-chunk and optional decoding can also be invoked per chunk, then concatenated.

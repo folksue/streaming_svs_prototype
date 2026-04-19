@@ -25,21 +25,25 @@ data:
 
 model:
   note_vocab_size: 256
-  note_emb_dim: 128
+  note_emb_dim: 192
   phoneme_vocab_size: 256
-  phoneme_emb_dim: 128
-  slur_emb_dim: 16
+  phoneme_emb_dim: 192
+  slur_emb_dim: 32
   phone_progress_bins: 8
-  phone_progress_emb_dim: 32
-  cond_dim: 256
-  token_emb_dim: 128
-  prev_step_dim: 256
-  model_dim: 512
-  attn_heads: 8
-  attn_layers: 4
-  history_window: 8
-  num_blocks: 6
+  phone_progress_emb_dim: 64
+  cond_dim: 384
+  token_emb_dim: 192
+  prev_step_dim: 384
+  model_dim: 768
+  attn_heads: 12
+  attn_layers: 6
+  history_window: 16
+  num_blocks: 8
   audio_history_window: 64
+  ffn_mult: 2.6666666667
+  attn_bias: false
+  ffn_bias: false
+  norm_eps: 1.0e-6
 
 train:
   epochs: 80

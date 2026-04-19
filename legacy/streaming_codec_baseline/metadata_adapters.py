@@ -154,7 +154,7 @@ def load_m4singer_entries(manifest_path: str, audio_root: str | None = None) -> 
         )
         note_values = first_present(raw, "notes", "note", "note_seq")
         if isinstance(note_values, list):
-            note_pitch_midi = [float(x) for x in note_values]
+            note_pitch_midi = [note_to_midi(x) for x in note_values]
         else:
             note_symbols = parse_symbol_sequence(note_values)
             note_pitch_midi = [note_to_midi(x) for x in note_symbols]
@@ -175,6 +175,16 @@ def load_m4singer_entries(manifest_path: str, audio_root: str | None = None) -> 
             dataset_root,
             fallback_relative=default_rel_audio_path,
         )
+        slur_values = first_present(raw, "is_slur", "note_slur", "slur")
+        if slur_values is None:
+            note_slur = [0 for _ in note_intervals]
+        else:
+            note_slur = parse_int_sequence(slur_values)
+            if len(note_slur) != len(note_intervals):
+                raise ValueError(
+                    f"M4Singer item '{item_name}' slur length mismatch: "
+                    f"notes={len(note_intervals)} slur={len(note_slur)}"
+                )
 
         duration = max_duration(phoneme_intervals, note_intervals, raw.get("duration"))
         entries.append(
@@ -185,7 +195,7 @@ def load_m4singer_entries(manifest_path: str, audio_root: str | None = None) -> 
                 "phoneme_intervals": phoneme_intervals,
                 "note_pitch_midi": note_pitch_midi,
                 "note_intervals": note_intervals,
-                "note_slur": [0 for _ in note_intervals],
+                "note_slur": note_slur,
                 "duration": duration,
             }
         )

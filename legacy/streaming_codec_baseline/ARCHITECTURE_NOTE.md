@@ -1,6 +1,9 @@
 # Legacy Model Architecture Note
 
 This note summarizes the current `legacy/streaming_codec_baseline` architecture after removing the outer chunk lattice.
+The default `config.yaml` now targets roughly `109M` parameters and uses
+Qwen-style `RMSNorm + SwiGLU` blocks while keeping the same dual-stack
+step-context plus frame-decoder topology.
 
 ## One-line Summary
 
