@@ -443,6 +443,13 @@ def note_to_midi(note: str) -> float:
     token = str(note).strip()
     if not token or token.lower() in {"rest", "sil", "sp", "pau"}:
         return 0.0
+
+    # Some metadata uses enharmonic alternatives like "G#4/Ab4".
+    # Keep the first variant and normalize accidental glyphs.
+    if "/" in token:
+        token = token.split("/", 1)[0].strip()
+    token = token.replace("♯", "#").replace("♭", "b")
+
     try:
         return float(token)
     except ValueError:

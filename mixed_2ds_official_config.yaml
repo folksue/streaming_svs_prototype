@@ -1,0 +1,56 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  chunk_ms: 100
+  encodec_model_name: facebook/encodec_24khz
+
+data:
+  train_manifest: artifacts/data/mixed_official_train_manifest.json
+  valid_manifest: artifacts/data/mixed_official_valid_manifest.json
+  manifest_adapter: manifest
+  train_manifest_adapter: manifest
+  valid_manifest_adapter: manifest
+  train_audio_root: null
+  valid_audio_root: null
+  auto_split_valid: false
+  valid_ratio: 0.05
+  min_valid_items: 1
+  phoneme_vocab_path: artifacts/data/mixed_official_phoneme_vocab.json
+  train_cache: artifacts/data/mixed_official_train_codes.pt
+  valid_cache: artifacts/data/mixed_official_valid_codes.pt
+  batch_size: 1
+  num_workers: 2
+  max_seq_len: 256
+
+model:
+  phoneme_vocab_size: 2048
+  phoneme_emb_dim: 128
+  pitch_proj_dim: 64
+  time_proj_dim: 64
+  cond_dim: 256
+  token_emb_dim: 128
+  prev_chunk_dim: 256
+  model_dim: 1408
+  num_blocks: 6
+
+train:
+  epochs: 80
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+  log_interval: 50
+  val_interval: 1
+
+logging:
+  backends: ["console", "tensorboard"]
+  tensorboard_dir: artifacts/runs/mixed_2ds_official_100m
+  wandb_project: streaming-svs
+  run_name: mixed-2ds-official-100m
+  wandb_mode: offline
+
+paths:
+  checkpoints: artifacts/checkpoints/mixed_2ds_official_100m
+  outputs: artifacts/outputs/mixed_2ds_official_100m
