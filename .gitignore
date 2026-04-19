@@ -11,6 +11,7 @@ legacy/streaming_codec_baseline/.venv_smoke/
 legacy/streaming_codec_baseline/.venv_smoke2/
 legacy/streaming_codec_baseline/artifacts_smoke/
 artifacts/
+data/
 datasets/
 third_party/
 *.log
