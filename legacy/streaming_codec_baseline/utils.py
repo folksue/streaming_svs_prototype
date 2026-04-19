@@ -131,9 +131,9 @@ def masked_cross_entropy(logits: torch.Tensor, target: torch.Tensor, mask: torch
     target_log_probs = log_probs.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
     while mask.dim() < target_log_probs.dim():
         mask = mask.unsqueeze(-1)
-    expanded_mask = mask.expand_as(target_log_probs)
-    loss = -target_log_probs * expanded_mask
-    return loss.sum() / expanded_mask.sum().clamp_min(1.0)
+    expanded_mask = mask.expand_as(target_log_probs).bool()
+    loss = torch.where(expanded_mask, -target_log_probs, torch.zeros_like(target_log_probs))
+    return loss.sum() / expanded_mask.float().sum().clamp_min(1.0)
 
 
 def continuity_metric(gen_z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

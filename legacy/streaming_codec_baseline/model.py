@@ -184,10 +184,17 @@ class StreamingSVSModel(nn.Module):
         x = self.step_in(torch.cat([cond, prev_repr], dim=-1))
         attn_mask = self._build_local_attn_mask(x.size(1), x.device, self.history_window)
         key_padding_mask = None
+        valid_rows = None
         if valid_mask is not None:
-            key_padding_mask = ~valid_mask.bool()
+            valid_rows = valid_mask.bool().unsqueeze(-1)
+            key_padding_mask = ~valid_rows.squeeze(-1)
+            x = x.masked_fill(~valid_rows, 0.0)
         for blk in self.context_blocks:
             x = blk(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            if valid_rows is not None:
+                # Prevent fully masked padded queries from producing NaNs that leak into later blocks.
+                x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+                x = x.masked_fill(~valid_rows, 0.0)
         return x
 
     def _build_audio_inputs(self, first_codes: torch.Tensor, step_h: torch.Tensor) -> torch.Tensor:
