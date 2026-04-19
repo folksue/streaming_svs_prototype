@@ -18,6 +18,16 @@ Research prototype for chunk-wise streaming singing synthesis.
 - **Training loss**: masked token-level cross-entropy (with token accuracy metrics)
 - **训练目标**：带 mask 的 token 级交叉熵（并记录 token 准确率）
 
+## Pipeline Clarification / 流程澄清
+- **Top-level pipeline (`preprocess_encodec.py`, `train.py`) is chunk-based**
+- **根目录主流程（`preprocess_encodec.py`, `train.py`）当前仍是 chunk 形式**
+- `chunk_ms` controls grouping width and yields `codes: [B, T, F, K]`
+- `chunk_ms` 决定分组宽度，目标张量为 `codes: [B, T, F, K]`
+- **Step-level (`tokens_per_step`) pipeline is in `legacy/streaming_codec_baseline`**
+- **按 step 的 `tokens_per_step` 路线在 `legacy/streaming_codec_baseline`**
+- If you need non-chunk step conditioning and codebook-0 AR + residual parallel heads, use the legacy path.
+- 若你要“去 chunk 的 step 条件建模 + 主码本AR + 其余码本并行残差头”，请使用 legacy 路线。
+
 ## Files / 文件说明
 - `preprocess_encodec.py`: waveform + alignment manifest -> chunk sequence cache (`.pt`)
 - `preprocess_encodec.py`：音频与对齐标注 -> 分块序列缓存（`.pt`）
