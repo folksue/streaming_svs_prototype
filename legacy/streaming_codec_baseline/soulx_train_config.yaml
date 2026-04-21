@@ -2,7 +2,7 @@ seed: 42
 
 audio:
   sample_rate: 24000
-  tokens_per_step: 8
+  tokens_per_step: 1
   encodec_model_name: facebook/encodec_24khz
 
 data:
@@ -40,6 +40,11 @@ model:
   history_window: 8
   num_blocks: 6
   audio_history_window: 64
+  # ===== Ablation knobs (keep future ablation params in this block) =====
+  # prepend learned virtual steps before the first real step (0 = disabled)
+  ablation_prefix_pad_steps: 0
+  # ===== End ablation knobs =====
+  rope_base: 10000.0
 
 train:
   epochs: 80

@@ -2,7 +2,7 @@ seed: 42
 
 audio:
   sample_rate: 24000
-  tokens_per_step: 8
+  tokens_per_step: 1
   encodec_model_name: facebook/encodec_24khz
 
 data:
@@ -40,6 +40,16 @@ model:
   history_window: 16
   num_blocks: 8
   audio_history_window: 64
+  control_encoder_type: mlp   # choices: mlp | convnext
+  control_conv_layers: 0      # set >0 to enable ConvNeXt-style control preflow
+  control_conv_hidden_mult: 2.0
+  control_conv_kernel_size: 7
+  control_conv_dilation: 1
+  # ===== Ablation knobs (keep future ablation params in this block) =====
+  # prepend learned virtual steps before the first real step (0 = disabled)
+  ablation_prefix_pad_steps: 0
+  # ===== End ablation knobs =====
+  rope_base: 10000.0
   ffn_mult: 2.6666666667
   attn_bias: false
   ffn_bias: false

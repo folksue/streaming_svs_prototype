@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tokens-per-step",
         type=int,
-        default=8,
+        default=1,
         help="How many codec frames belong to one model step.",
     )
     parser.add_argument(
