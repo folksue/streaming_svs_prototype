@@ -1,47 +1,32 @@
 # Legacy Streaming SVS Handoff
 
-This handoff is for continuing work on:
+This handoff tracks the current production branch for:
 
 - [legacy/streaming_codec_baseline](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline)
 
-It reflects the current state after the step-level refactor and smoke-test validation.
+Scope is still legacy controllable SVS baseline (not `qwen3_8b_singing` route).
 
-## Scope
+## Current Mainline (Important)
 
-This is **not** the `qwen3_8b_singing` route.
+Current model is now **single-stream decoder-only interleaving**:
 
-The active target is still the legacy EnCodec baseline, but it is no longer chunk-semantic. The current line is:
+- step sequence layout: `[CONTROL], [FRAME_0], [FRAME_1], ... [FRAME_(S-1)]`
+- each frame slot predicts **all codebooks in parallel** (`K` linear heads)
+- no more “codebook-0 AR + residual fine heads” path
+- local/sliding causal attention on token stream
+- RoPE enabled
+- inference supports online incremental generation with KV cache
 
-- EnCodec discrete codec tokens
-- explicit symbolic control
-- step-level local/sliding causal attention
-- main-codebook autoregression with residual parallel heads
+So this line is:
 
-## Current Design
+- explicit symbolic control per step
+- fixed step grouping via `tokens_per_step = S`
+- parallel multi-codebook prediction per frame slot
+- streaming-friendly incremental decode
 
-The legacy path now treats each training unit as a **step**, not a chunk.
+## Control Protocol (v1)
 
-Per step:
-
-- one control state
-- one grouped audio target of `tokens_per_step` consecutive EnCodec frames
-
-The grouping hyperparameter is:
-
-- `audio.tokens_per_step`
-
-This is only an engineering grouping factor. It replaces the old chunk packaging role, but it is **not** a semantic chunk boundary in the model.
-
-## Current Control Schema
-
-The active v1 control set is:
-
-- `NOTE`
-- `PHONEME`
-- `SLUR`
-- `PHONE_PROGRESS`
-
-Concrete cache fields:
+Per-step control fields:
 
 - `note_id`
 - `phoneme_id`
@@ -50,214 +35,117 @@ Concrete cache fields:
 - `note_on_boundary`
 - `note_off_boundary`
 
-We still do **not** use `NOTE_PROGRESS`.
-
-Reason:
-
-- for the current OpenCpop-style flattened supervision, `SLUR + NOTE + PHONEME + PHONE_PROGRESS` is the smallest useful set
-
-## Current Model Behavior
-
-The old outer chunk-history mechanism has been removed.
-
-The current model is:
-
-- step-level local causal attention over explicit control + previous-step summary
-- within each step:
-  - `codebook 0` is decoded sequentially
-  - `codebook 1..K-1` are predicted by parallel residual heads
-
-So the current decoding protocol is:
-
-- **not** full flatten-all-codebooks autoregression
-- **not** delay pattern
-- **not** fully parallel all-codebook prediction
-
-It is:
-
-- **main codebook AR + same-step residual parallel heads**
-
-This choice is intentional because the model has strong per-step control inputs, and delay scheduling would misalign control with finer codebooks from shifted time positions.
+Still using `PHONE_PROGRESS`, and still **not** introducing `NOTE_PROGRESS` in current legacy line.
 
 ## Cache Format
 
-Cache format has changed again and old caches are invalid.
-
-Current values:
+Step cache format currently required by dataset/model:
 
 - `CACHE_FORMAT = "svs_step_codes"`
 - `CACHE_FORMAT_VERSION = 3`
 
-This means:
-
-- any earlier chunk-based cache must be regenerated
-
-## What “Regenerate Cache” Means
-
-It means rerunning:
+If old chunk cache is used, regenerate with:
 
 - [preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
 
-to rebuild:
+## Key Hyperparameters
 
-- train cache
-- valid cache
+From current default config:
 
-with the new step-based schema.
+- `audio.tokens_per_step: 1` (current default mainline)
+- `model.model_dim: 768`
+- `model.attn_heads: 12`
+- `model.attn_layers: 6`
+- `model.num_blocks: 8`
+- `model.history_window: 16`
+- `model.rope_base: 10000.0`
+- `model.ablation_prefix_pad_steps: 0` (ablation knob)
 
-Old chunk-based `.pt` cache files are not compatible with the new code.
+Note:
 
-## Files Most Relevant Now
+- `tokens_per_step` defines per-step audio slot count (`S`)
+- `K` comes from cached codec metadata (`num_codebooks`)
 
-Core implementation:
+## Streaming Behavior
 
-- [preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
-- [metadata_adapters.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/metadata_adapters.py)
-- [dataset.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/dataset.py)
+Implemented in:
+
 - [model.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/model.py)
-- [train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/train.py)
-- [infer.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/infer.py)
-- [config.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/config.yaml)
-- [resume_soulx_train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/resume_soulx_train.py)
-- [soulx_train_config.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/soulx_train_config.yaml)
 
-Current architecture note:
+Entry points:
+
+- `forward_train(...)` for offline training
+- `generate_stream(...)` for online step-by-step generation
+- `generate(...)` wrapper over `generate_stream`
+
+Inference script:
+
+- [infer.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/infer.py)
+
+`infer.py` can decode per-step outputs to waveform with EnCodec decoder calls. This is streaming-style script orchestration (step loop), not persistent internal EnCodec decode state.
+
+## Prefix-Pad Ablation
+
+Ablation support exists for synthetic history at sequence start:
+
+- `model.ablation_prefix_pad_steps`
+
+Behavior:
+
+- prepends learned virtual steps before first real step
+- applies in train and stream generation paths
+
+## Mixed-Dataset Path
+
+Training can use mixed manifests via config-level manifests/adapters in:
+
+- [configs/train_100m_mixed_official.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/configs/train_100m_mixed_official.yaml)
+
+Primary train launcher:
+
+- [train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/train.py)
+
+## Architecture / Docs
+
+Model structure note (updated):
 
 - [ARCHITECTURE_NOTE.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/ARCHITECTURE_NOTE.md)
 
-Smoke config:
+Main related files:
 
-- [examples/config_smoke.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/config_smoke.yaml)
-- [examples/opencpop_smoke_train.txt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/opencpop_smoke_train.txt)
-- [examples/opencpop_smoke_valid.txt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/examples/opencpop_smoke_valid.txt)
-
-## Important Bug Fix Included
-
-OpenCpop note parsing needed a compatibility fix for note spellings like:
-
-- `G#4/Ab4`
-
-This was fixed in:
-
+- [preprocess_encodec.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/preprocess_encodec.py)
+- [dataset.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/dataset.py)
 - [metadata_adapters.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/metadata_adapters.py)
-
-The parser now splits on `/` and uses the first spelling before converting to MIDI.
-
-## Current Training / Inference Semantics
-
-### Training
-
-- data is stored as step sequences
-- local causal attention is applied directly during training
-- there is no special extra “simulate truncation” branch
-- the training-time attention constraint is already the same local-window assumption used by inference
-
-### Inference
-
-- continuous step-by-step generation
-- one control state per step
-- same sliding/local context rule as training
-- EnCodec wav decoding can still be invoked step-by-step at script level
-
-## Smoke Test Status
-
-This has already been validated locally on CPU.
-
-Environment used:
-
-- temporary venv at `/tmp/legacy_svs_smoke`
-
-Verified dependencies:
-
-- `torch 2.11.0+cpu`
-- `torchaudio 2.11.0+cpu`
-- `transformers 5.5.4`
-- `soundfile`
-- `numpy`
-
-### Smoke preprocess
-
-Command:
-
-```bash
-cd /mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline
-/tmp/legacy_svs_smoke/bin/python preprocess_encodec.py --config examples/config_smoke.yaml --split both
-```
-
-Result:
-
-- succeeded
-- wrote:
-  - [train_steps.pt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/artifacts_smoke/data/train_steps.pt)
-  - [valid_steps.pt](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/artifacts_smoke/data/valid_steps.pt)
-
-### Smoke train
-
-Command:
-
-```bash
-cd /mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline
-/tmp/legacy_svs_smoke/bin/python train.py --config examples/config_smoke.yaml
-```
-
-Result:
-
-- succeeded
-- tiny smoke model trained for one epoch
-- reported:
-  - `Model params: 1.32M`
-  - final validation metrics were emitted without shape/runtime failure
-
-This is enough to say:
-
-- preprocess works
-- new cache schema works
-- training forward/backward works
-- the step-level refactor is not broken at basic runtime level
-
-## Logging
-
-There is already a metric logger abstraction in:
-
+- [model.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/model.py)
+- [train.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/train.py)
+- [infer.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/infer.py)
 - [logging_utils.py](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/logging_utils.py)
 
-Supported backends:
+## Logging / Repro
+
+Logger backends:
 
 - `console`
 - `tensorboard`
 - `wandb`
 
-Practical recommendation for this stage:
-
-- use `console + tensorboard`
-- `wandb` is optional and not required yet
+For current stage, default recommendation remains `console + tensorboard`; `wandb` optional.
 
 ## Docker
 
-GPU Docker packaging already exists for the legacy baseline:
+GPU Docker assets remain in:
 
 - [Dockerfile.gpu](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/Dockerfile.gpu)
 - [compose.gpu.yaml](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/compose.gpu.yaml)
 - [DOCKER.md](/mnt/c/streaming_svs_prototype/legacy/streaming_codec_baseline/DOCKER.md)
 
-It packages:
+They package source/runtime deps; datasets/caches/checkpoints are expected as mounted host volumes.
 
-- the legacy baseline source
+## Recent Commits On Main (Context)
 
-It does **not** package by default:
-
-- datasets
-- generated caches
-- checkpoints
-
-Those are still expected to be mounted from host.
-
-## Git Commits Relevant to This Work
-
-Already on remote `main`:
-
-- `0e07119` `legacy: switch chunk conditioning to explicit note/phoneme controls`
-- `6e1f02f` `legacy: document control protocol v1`
+- `fce18a0` `legacy: switch to frame-AR + parallel codebook heads, add RoPE and online streaming decode`
+- `308c3c2` `chore: ignore local research assets for cleaner pull/rebase workflow`
+- `c69d70b` `docs: add project note handoff summary`
 - `4c212d9` `legacy: add gpu docker packaging and handoff docs`
 - `8525c3b` `legacy: switch codec baseline to step-level decoding`
 - `088b10e` `legacy: add step smoke config and notes`
