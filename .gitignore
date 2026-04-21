@@ -16,3 +16,14 @@ datasets/
 third_party/
 *.log
 .DS_Store
+
+# Local research/workbench assets (do not affect core training code)
+papers/
+datasets_meta/
+qwen3_8b_singing/
+
+# Local helper scripts copied for personal workflow
+scripts/zotero_import.sh
+scripts/zotero_import.ps1
+legacy/streaming_codec_baseline/scripts/zotero_import.sh
+legacy/streaming_codec_baseline/scripts/zotero_import.ps1
