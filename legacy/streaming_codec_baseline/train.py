@@ -403,6 +403,20 @@ def main() -> None:
 
             if epoch % cfg["train"]["val_interval"] == 0:
                 va = run_validation(model, valid_loader, dev)
+                val_per_k_str = " ".join(
+                    f"val/acc_k{k}={va[key]:.5f}"
+                    for k, key in sorted(
+                        ((int(k.replace("acc_k", "")), k) for k in va.keys() if k.startswith("acc_k")),
+                        key=lambda x: x[0],
+                    )
+                )
+                val_ar_per_k_str = " ".join(
+                    f"val/ar_acc_k{k}={va[key]:.5f}"
+                    for k, key in sorted(
+                        ((int(k.replace("ar_acc_k", "")), k) for k in va.keys() if k.startswith("ar_acc_k")),
+                        key=lambda x: x[0],
+                    )
+                )
                 print(
                     f"epoch={epoch:03d} "
                     f"train/ce={tr['ce']:.5f} train/acc={tr['acc']:.5f} "
@@ -411,7 +425,8 @@ def main() -> None:
                     f"val/coarse_acc={va['coarse_acc']:.5f} val/fine_acc={va['fine_acc']:.5f} "
                     f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f} "
                     f"val/ar_acc={va['ar_acc']:.5f} "
-                    f"val/ar_coarse_acc={va['ar_coarse_acc']:.5f} val/ar_fine_acc={va['ar_fine_acc']:.5f}"
+                    f"val/ar_coarse_acc={va['ar_coarse_acc']:.5f} val/ar_fine_acc={va['ar_fine_acc']:.5f} "
+                    f"{val_per_k_str} {val_ar_per_k_str}"
                 )
                 logger.log_metrics(
                     {
