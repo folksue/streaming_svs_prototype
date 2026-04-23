@@ -10,6 +10,7 @@ STANDARD_MANIFEST = "manifest"
 M4SINGER_ADAPTER = "m4singer"
 OPENCPOP_ADAPTER = "opencpop"
 SOULX_SINGER_EVAL_ADAPTER = "soulx-singer-eval"
+ACE_OPENCPOP_SEGMENTS_ADAPTER = "ace-opencpop-segments"
 
 
 def normalize_adapter_name(name: str | None) -> str:
@@ -23,6 +24,7 @@ def adapter_needs_phoneme_vocab(adapter_name: str) -> bool:
         M4SINGER_ADAPTER,
         OPENCPOP_ADAPTER,
         SOULX_SINGER_EVAL_ADAPTER,
+        ACE_OPENCPOP_SEGMENTS_ADAPTER,
     }
 
 
@@ -43,6 +45,8 @@ def load_manifest_entries(
         return load_opencpop_entries(manifest_path, audio_root=audio_root)
     if adapter == SOULX_SINGER_EVAL_ADAPTER:
         return load_soulx_singer_eval_entries(manifest_path, audio_root=audio_root)
+    if adapter == ACE_OPENCPOP_SEGMENTS_ADAPTER:
+        return load_ace_opencpop_segments_entries(manifest_path, audio_root=audio_root)
     raise ValueError(f"Unsupported manifest adapter: {adapter_name}")
 
 
@@ -313,6 +317,107 @@ def load_soulx_singer_eval_entries(manifest_path: str, audio_root: str | None = 
                 "note_pitch_midi": note_pitch_midi,
                 "note_intervals": note_intervals,
                 "note_slur": [0 for _ in note_intervals],
+                "duration": max_duration(phoneme_intervals, note_intervals, raw.get("duration")),
+            }
+        )
+    return entries
+
+
+def load_ace_opencpop_segments_entries(manifest_path: str, audio_root: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Load ACE-OpenCpop segment metadata exported from HF (or converted sample JSON).
+
+    Supported manifest shapes:
+    1) list[dict], where each dict is a segment entry.
+    2) HF datasets-server payload with top-level {"rows": [{"row": {...}}, ...]}.
+    """
+    base_dir = os.path.dirname(manifest_path)
+    dataset_root = audio_root or base_dir
+    raw_payload = load_json(manifest_path)
+
+    raw_entries: List[Dict[str, Any]]
+    if isinstance(raw_payload, list):
+        raw_entries = raw_payload
+    elif isinstance(raw_payload, dict) and isinstance(raw_payload.get("rows"), list):
+        raw_entries = []
+        for item in raw_payload["rows"]:
+            if isinstance(item, dict) and isinstance(item.get("row"), dict):
+                raw_entries.append(item["row"])
+            elif isinstance(item, dict):
+                raw_entries.append(item)
+            else:
+                raise ValueError("Invalid ACE-OpenCpop rows payload item; expected dict/row-dict.")
+    else:
+        raise ValueError("ACE-OpenCpop manifest must be a list or a {'rows': [...]} dict payload.")
+
+    entries: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(raw_entries):
+        if not isinstance(raw, dict):
+            raise ValueError(f"ACE-OpenCpop entry at index {idx} is not a dict.")
+
+        utt_id = str(first_present(raw, "segment_id", "utt_id", "id"))
+        if not utt_id or utt_id == "None":
+            raise ValueError(f"ACE-OpenCpop entry at index {idx} is missing segment_id/utt_id.")
+
+        phoneme_symbols = parse_symbol_sequence(first_present(raw, "phn", "phoneme_symbols", "phones", "phonemes"))
+        ph_starts = parse_float_sequence(first_present(raw, "phn_start_time", "ph_start"))
+        ph_ends = parse_float_sequence(first_present(raw, "phn_end_time", "ph_end"))
+        if len(ph_starts) != len(ph_ends):
+            raise ValueError(f"{utt_id}: phn_start_time/phn_end_time length mismatch.")
+        phoneme_intervals = [[float(s), float(e)] for s, e in zip(ph_starts, ph_ends)]
+
+        note_values = first_present(raw, "note_midi", "note_pitch_midi", "notes", "note")
+        if isinstance(note_values, list) and (not note_values or isinstance(note_values[0], (int, float))):
+            note_pitch_midi = [float(x) for x in note_values]
+        else:
+            note_pitch_midi = [note_to_midi(x) for x in parse_symbol_sequence(note_values)]
+
+        note_starts = parse_float_sequence(first_present(raw, "note_start_times", "note_start"))
+        note_ends = parse_float_sequence(first_present(raw, "note_end_times", "note_end"))
+        if len(note_starts) != len(note_ends):
+            raise ValueError(f"{utt_id}: note_start_times/note_end_times length mismatch.")
+        note_intervals = [[float(s), float(e)] for s, e in zip(note_starts, note_ends)]
+
+        ensure_aligned_lengths(utt_id, "phoneme", phoneme_symbols, phoneme_intervals)
+        ensure_aligned_lengths(utt_id, "note", note_pitch_midi, note_intervals)
+
+        # ACE metadata does not provide explicit slur labels in the same way as OpenCpop;
+        # we keep a neutral zero vector so downstream protocol remains compatible.
+        note_slur = [0 for _ in note_intervals]
+
+        audio_candidate = first_present(raw, "audio_path", "wav_path", "wav_fn", "wav")
+        if not audio_candidate:
+            audio_meta = raw.get("audio")
+            if isinstance(audio_meta, str):
+                audio_candidate = audio_meta
+            elif isinstance(audio_meta, dict):
+                audio_candidate = first_present(audio_meta, "path", "src", "url", "filename")
+            elif isinstance(audio_meta, list) and audio_meta:
+                first = audio_meta[0]
+                if isinstance(first, dict):
+                    audio_candidate = first_present(first, "path", "src", "url", "filename")
+                elif isinstance(first, str):
+                    audio_candidate = first
+
+        if isinstance(audio_candidate, str) and audio_candidate.startswith(("http://", "https://")):
+            # Keep local loading semantics: require local sample wav path when remote URL is present.
+            audio_candidate = None
+
+        audio_path = resolve_audio_path(
+            audio_candidate,
+            dataset_root,
+            fallback_relative=f"{utt_id}.wav",
+        )
+
+        entries.append(
+            {
+                "utt_id": utt_id,
+                "audio_path": audio_path,
+                "phoneme_symbols": phoneme_symbols,
+                "phoneme_intervals": phoneme_intervals,
+                "note_pitch_midi": note_pitch_midi,
+                "note_intervals": note_intervals,
+                "note_slur": note_slur,
                 "duration": max_duration(phoneme_intervals, note_intervals, raw.get("duration")),
             }
         )

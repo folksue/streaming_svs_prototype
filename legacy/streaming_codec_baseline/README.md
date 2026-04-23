@@ -163,6 +163,7 @@ Adapters can also build this schema from real dataset metadata:
 - `m4singer`: real `meta.json` with `item_name / phs / ph_dur / notes / notes_dur`
 - `opencpop`: OpenCpop `transcriptions.txt`-style metadata
 - `soulx-singer-eval`: JSON or JSONL with GTSinger-style `phs / ph_dur / notes / notes_dur`
+- `ace-opencpop-segments`: ACE-OpenCpop segment JSON (`segment_id/phn/note_*`) from HF export or sample downloader
 
 For real metadata adapters, preprocessing builds/reuses phoneme vocab at `data.phoneme_vocab_path`.
 对于真实数据适配器，预处理会在 `data.phoneme_vocab_path` 生成/复用音素词表。
@@ -235,6 +236,29 @@ For auto-split, `valid_manifest` can be an empty JSON list file:
 自动切分时，`valid_manifest` 可以是空 JSON 列表文件：
 ```json
 []
+```
+
+ACE-OpenCpop sample (download + adapter):
+```bash
+cd legacy/streaming_codec_baseline
+python scripts/download_ace_opencpop_samples.py \
+  --max_rows 20 \
+  --allow_missing_audio \
+  --audio_dir data/samples/ace_opencpop/audio \
+  --manifest_out data/samples/ace_opencpop/manifest.json
+```
+
+If signed sample audio URLs return 403 in your region/network, keep `--allow_missing_audio` or switch to `--skip_audio` to export metadata only.
+
+```yaml
+data:
+  train_manifest: data/samples/ace_opencpop/manifest.json
+  valid_manifest: data/samples/ace_opencpop/manifest.json
+  train_manifest_adapter: ace-opencpop-segments
+  valid_manifest_adapter: ace-opencpop-segments
+  train_audio_root: data/samples/ace_opencpop/audio
+  valid_audio_root: data/samples/ace_opencpop/audio
+  phoneme_vocab_path: artifacts/data/ace_sample_phoneme_vocab.json
 ```
 
 ## Pipeline / 流程
