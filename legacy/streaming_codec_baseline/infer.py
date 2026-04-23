@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--decode_wav", action="store_true")
+    p.add_argument(
+        "--stream_decode",
+        action="store_true",
+        help="Decode step-by-step and concatenate chunks (streaming-style, lower quality). "
+        "Default is full-sequence decode for quality diagnostics.",
+    )
     p.add_argument("--save_step_wavs", action="store_true")
     p.add_argument("--out_dir", type=str, default="outputs")
     return p.parse_args()
@@ -148,7 +154,7 @@ def main() -> None:
             )
         ):
             pred_steps.append(step_codes)
-            if decoder is not None:
+            if decoder is not None and args.stream_decode:
                 step_wav = decoder.decode_chunk(step_codes.squeeze(0))
                 stream_wav_steps.append(step_wav)
                 if args.save_step_wavs:
@@ -177,11 +183,19 @@ def main() -> None:
     )
 
     if args.decode_wav:
-        wav = torch.cat(stream_wav_steps, dim=-1) if stream_wav_steps else torch.empty(0)
+        if args.stream_decode:
+            wav = torch.cat(stream_wav_steps, dim=-1) if stream_wav_steps else torch.empty(0)
+        else:
+            # Quality-oriented decode: decode the full predicted token sequence at once.
+            full_codes = codes_pred.squeeze(0).reshape(-1, codes_pred.size(-1))  # [T*S, K]
+            wav = decoder.decode_from_codes(full_codes)
         out_wav = os.path.join(args.out_dir, f"sample_{args.index:04d}.wav")
         sf.write(out_wav, wav.numpy(), int(ckpt["config"]["audio"]["sample_rate"]))
         print(f"saved wav: {out_wav}")
-        print("note: wav was produced with step-wise decode calls for streaming-style inference.")
+        if args.stream_decode:
+            print("note: wav was produced with step-wise decode calls for streaming-style inference.")
+        else:
+            print("note: wav was produced with full-sequence decode (recommended for quality checks).")
 
 
 if __name__ == "__main__":

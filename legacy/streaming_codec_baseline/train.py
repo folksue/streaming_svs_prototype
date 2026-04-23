@@ -100,6 +100,8 @@ def run_epoch(
 
     total_loss = 0.0
     total_acc = 0.0
+    total_coarse_acc = 0.0
+    total_fine_acc = 0.0
     total_n = 0
 
     for step, batch in enumerate(loader, start=1):
@@ -131,18 +133,26 @@ def run_epoch(
             scheduler.step()
 
         acc = masked_code_accuracy(logits.detach().argmax(dim=-1), codes, mask)
+        coarse_acc, fine_acc = compute_coarse_fine_accuracy(logits.detach().argmax(dim=-1), codes, mask)
 
         total_loss += float(loss.item())
         total_acc += float(acc.item())
+        total_coarse_acc += float(coarse_acc.item())
+        total_fine_acc += float(fine_acc.item())
         total_n += 1
 
         if train and step % log_interval == 0:
             current_lr = float(optimizer.param_groups[0]["lr"])
-            print(f"step={step} train/ce={loss.item():.5f} train/acc={acc.item():.5f}")
+            print(
+                f"step={step} train/ce={loss.item():.5f} train/acc={acc.item():.5f} "
+                f"train/coarse_acc={coarse_acc.item():.5f} train/fine_acc={fine_acc.item():.5f}"
+            )
             logger.log_metrics(
                 {
                     "train/step_ce": float(loss.item()),
                     "train/step_acc": float(acc.item()),
+                    "train/step_coarse_acc": float(coarse_acc.item()),
+                    "train/step_fine_acc": float(fine_acc.item()),
                     "train/lr": current_lr,
                     "train/epoch": float(epoch),
                 },
@@ -152,8 +162,26 @@ def run_epoch(
     return {
         "ce": total_loss / max(total_n, 1),
         "acc": total_acc / max(total_n, 1),
+        "coarse_acc": total_coarse_acc / max(total_n, 1),
+        "fine_acc": total_fine_acc / max(total_n, 1),
         "global_step": global_step + total_n,
     }
+
+
+def compute_coarse_fine_accuracy(
+    pred_codes: torch.Tensor,  # [B,T,S,K]
+    target_codes: torch.Tensor,  # [B,T,S,K]
+    mask: torch.Tensor,  # [B,T]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    coarse_acc = masked_code_accuracy(pred_codes[..., 0], target_codes[..., 0], mask)
+    if target_codes.size(-1) <= 1:
+        return coarse_acc, coarse_acc
+    fine_accs = [
+        masked_code_accuracy(pred_codes[..., k], target_codes[..., k], mask)
+        for k in range(1, target_codes.size(-1))
+    ]
+    fine_acc = torch.stack(fine_accs).mean()
+    return coarse_acc, fine_acc
 
 
 @torch.no_grad()
@@ -161,8 +189,15 @@ def run_validation(model, loader, dev):
     model.eval()
     total_ce = 0.0
     total_acc = 0.0
+    total_coarse = 0.0
+    total_fine = 0.0
     total_on = 0.0
     total_off = 0.0
+    total_ar_acc = 0.0
+    total_ar_coarse = 0.0
+    total_ar_fine = 0.0
+    total_ar_on = 0.0
+    total_ar_off = 0.0
     n = 0
 
     for batch in loader:
@@ -187,20 +222,48 @@ def run_validation(model, loader, dev):
 
         ce = masked_cross_entropy(logits, codes, mask)
         acc = masked_code_accuracy(pred_codes, codes, mask)
+        coarse_acc, fine_acc = compute_coarse_fine_accuracy(pred_codes, codes, mask)
         on_acc = masked_code_accuracy(pred_codes, codes, on_b * mask)
         off_acc = masked_code_accuracy(pred_codes, codes, off_b * mask)
 
+        # Pure autoregressive validation (non-teacher-forcing): generate full sequence from control tokens.
+        ar_codes = model.generate(
+            note_id=note_id,
+            phoneme_id=phoneme_id,
+            slur=slur,
+            phone_progress=phone_progress,
+            temperature=0.0,
+        )
+        ar_acc = masked_code_accuracy(ar_codes, codes, mask)
+        ar_coarse_acc, ar_fine_acc = compute_coarse_fine_accuracy(ar_codes, codes, mask)
+        ar_on_acc = masked_code_accuracy(ar_codes, codes, on_b * mask)
+        ar_off_acc = masked_code_accuracy(ar_codes, codes, off_b * mask)
+
         total_ce += float(ce.item())
         total_acc += float(acc.item())
+        total_coarse += float(coarse_acc.item())
+        total_fine += float(fine_acc.item())
         total_on += float(on_acc.item())
         total_off += float(off_acc.item())
+        total_ar_acc += float(ar_acc.item())
+        total_ar_coarse += float(ar_coarse_acc.item())
+        total_ar_fine += float(ar_fine_acc.item())
+        total_ar_on += float(ar_on_acc.item())
+        total_ar_off += float(ar_off_acc.item())
         n += 1
 
     return {
         "ce": total_ce / max(n, 1),
         "acc": total_acc / max(n, 1),
+        "coarse_acc": total_coarse / max(n, 1),
+        "fine_acc": total_fine / max(n, 1),
         "on_boundary_acc": total_on / max(n, 1),
         "off_boundary_acc": total_off / max(n, 1),
+        "ar_acc": total_ar_acc / max(n, 1),
+        "ar_coarse_acc": total_ar_coarse / max(n, 1),
+        "ar_fine_acc": total_ar_fine / max(n, 1),
+        "ar_on_boundary_acc": total_ar_on / max(n, 1),
+        "ar_off_boundary_acc": total_ar_off / max(n, 1),
     }
 
 
@@ -287,6 +350,8 @@ def main() -> None:
                 {
                     "train/ce": float(tr["ce"]),
                     "train/acc": float(tr["acc"]),
+                    "train/coarse_acc": float(tr["coarse_acc"]),
+                    "train/fine_acc": float(tr["fine_acc"]),
                     "train/epoch": float(epoch),
                 },
                 step=global_step,
@@ -297,15 +362,26 @@ def main() -> None:
                 print(
                     f"epoch={epoch:03d} "
                     f"train/ce={tr['ce']:.5f} train/acc={tr['acc']:.5f} "
+                    f"train/coarse_acc={tr['coarse_acc']:.5f} train/fine_acc={tr['fine_acc']:.5f} "
                     f"val/ce={va['ce']:.5f} val/acc={va['acc']:.5f} "
-                    f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f}"
+                    f"val/coarse_acc={va['coarse_acc']:.5f} val/fine_acc={va['fine_acc']:.5f} "
+                    f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f} "
+                    f"val/ar_acc={va['ar_acc']:.5f} "
+                    f"val/ar_coarse_acc={va['ar_coarse_acc']:.5f} val/ar_fine_acc={va['ar_fine_acc']:.5f}"
                 )
                 logger.log_metrics(
                     {
                         "val/ce": float(va["ce"]),
                         "val/acc": float(va["acc"]),
+                        "val/coarse_acc": float(va["coarse_acc"]),
+                        "val/fine_acc": float(va["fine_acc"]),
                         "val/on_boundary_acc": float(va["on_boundary_acc"]),
                         "val/off_boundary_acc": float(va["off_boundary_acc"]),
+                        "val/ar_acc": float(va["ar_acc"]),
+                        "val/ar_coarse_acc": float(va["ar_coarse_acc"]),
+                        "val/ar_fine_acc": float(va["ar_fine_acc"]),
+                        "val/ar_on_boundary_acc": float(va["ar_on_boundary_acc"]),
+                        "val/ar_off_boundary_acc": float(va["ar_off_boundary_acc"]),
                         "val/epoch": float(epoch),
                     },
                     step=global_step,
