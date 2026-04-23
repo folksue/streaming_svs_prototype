@@ -102,6 +102,7 @@ def run_epoch(
     total_acc = 0.0
     total_coarse_acc = 0.0
     total_fine_acc = 0.0
+    total_per_k_acc = None
     total_n = 0
 
     for step, batch in enumerate(loader, start=1):
@@ -134,11 +135,16 @@ def run_epoch(
 
         acc = masked_code_accuracy(logits.detach().argmax(dim=-1), codes, mask)
         coarse_acc, fine_acc = compute_coarse_fine_accuracy(logits.detach().argmax(dim=-1), codes, mask)
+        per_k_acc = compute_per_codebook_accuracy(logits.detach().argmax(dim=-1), codes, mask)
 
         total_loss += float(loss.item())
         total_acc += float(acc.item())
         total_coarse_acc += float(coarse_acc.item())
         total_fine_acc += float(fine_acc.item())
+        if total_per_k_acc is None:
+            total_per_k_acc = [0.0 for _ in range(len(per_k_acc))]
+        for k in range(len(per_k_acc)):
+            total_per_k_acc[k] += float(per_k_acc[k].item())
         total_n += 1
 
         if train and step % log_interval == 0:
@@ -153,19 +159,24 @@ def run_epoch(
                     "train/step_acc": float(acc.item()),
                     "train/step_coarse_acc": float(coarse_acc.item()),
                     "train/step_fine_acc": float(fine_acc.item()),
+                    **{f"train/step_acc_k{k}": float(v.item()) for k, v in enumerate(per_k_acc)},
                     "train/lr": current_lr,
                     "train/epoch": float(epoch),
                 },
                 step=global_step + step,
             )
 
-    return {
+    metrics = {
         "ce": total_loss / max(total_n, 1),
         "acc": total_acc / max(total_n, 1),
         "coarse_acc": total_coarse_acc / max(total_n, 1),
         "fine_acc": total_fine_acc / max(total_n, 1),
         "global_step": global_step + total_n,
     }
+    if total_per_k_acc is not None:
+        for k in range(len(total_per_k_acc)):
+            metrics[f"acc_k{k}"] = total_per_k_acc[k] / max(total_n, 1)
+    return metrics
 
 
 def compute_coarse_fine_accuracy(
@@ -184,6 +195,17 @@ def compute_coarse_fine_accuracy(
     return coarse_acc, fine_acc
 
 
+def compute_per_codebook_accuracy(
+    pred_codes: torch.Tensor,  # [B,T,S,K]
+    target_codes: torch.Tensor,  # [B,T,S,K]
+    mask: torch.Tensor,  # [B,T]
+) -> list[torch.Tensor]:
+    return [
+        masked_code_accuracy(pred_codes[..., k], target_codes[..., k], mask)
+        for k in range(target_codes.size(-1))
+    ]
+
+
 @torch.no_grad()
 def run_validation(model, loader, dev):
     model.eval()
@@ -198,6 +220,8 @@ def run_validation(model, loader, dev):
     total_ar_fine = 0.0
     total_ar_on = 0.0
     total_ar_off = 0.0
+    total_per_k = None
+    total_ar_per_k = None
     n = 0
 
     for batch in loader:
@@ -223,6 +247,7 @@ def run_validation(model, loader, dev):
         ce = masked_cross_entropy(logits, codes, mask)
         acc = masked_code_accuracy(pred_codes, codes, mask)
         coarse_acc, fine_acc = compute_coarse_fine_accuracy(pred_codes, codes, mask)
+        per_k_acc = compute_per_codebook_accuracy(pred_codes, codes, mask)
         on_acc = masked_code_accuracy(pred_codes, codes, on_b * mask)
         off_acc = masked_code_accuracy(pred_codes, codes, off_b * mask)
 
@@ -236,6 +261,7 @@ def run_validation(model, loader, dev):
         )
         ar_acc = masked_code_accuracy(ar_codes, codes, mask)
         ar_coarse_acc, ar_fine_acc = compute_coarse_fine_accuracy(ar_codes, codes, mask)
+        ar_per_k_acc = compute_per_codebook_accuracy(ar_codes, codes, mask)
         ar_on_acc = masked_code_accuracy(ar_codes, codes, on_b * mask)
         ar_off_acc = masked_code_accuracy(ar_codes, codes, off_b * mask)
 
@@ -250,9 +276,15 @@ def run_validation(model, loader, dev):
         total_ar_fine += float(ar_fine_acc.item())
         total_ar_on += float(ar_on_acc.item())
         total_ar_off += float(ar_off_acc.item())
+        if total_per_k is None:
+            total_per_k = [0.0 for _ in range(len(per_k_acc))]
+            total_ar_per_k = [0.0 for _ in range(len(ar_per_k_acc))]
+        for k in range(len(per_k_acc)):
+            total_per_k[k] += float(per_k_acc[k].item())
+            total_ar_per_k[k] += float(ar_per_k_acc[k].item())
         n += 1
 
-    return {
+    metrics = {
         "ce": total_ce / max(n, 1),
         "acc": total_acc / max(n, 1),
         "coarse_acc": total_coarse / max(n, 1),
@@ -265,6 +297,11 @@ def run_validation(model, loader, dev):
         "ar_on_boundary_acc": total_ar_on / max(n, 1),
         "ar_off_boundary_acc": total_ar_off / max(n, 1),
     }
+    if total_per_k is not None and total_ar_per_k is not None:
+        for k in range(len(total_per_k)):
+            metrics[f"acc_k{k}"] = total_per_k[k] / max(n, 1)
+            metrics[f"ar_acc_k{k}"] = total_ar_per_k[k] / max(n, 1)
+    return metrics
 
 
 def main() -> None:
@@ -352,6 +389,13 @@ def main() -> None:
                     "train/acc": float(tr["acc"]),
                     "train/coarse_acc": float(tr["coarse_acc"]),
                     "train/fine_acc": float(tr["fine_acc"]),
+                    **{
+                        f"train/acc_k{k}": float(v)
+                        for k, v in sorted(
+                            ((int(key.replace("acc_k", "")), value) for key, value in tr.items() if key.startswith("acc_k")),
+                            key=lambda x: x[0],
+                        )
+                    },
                     "train/epoch": float(epoch),
                 },
                 step=global_step,
@@ -382,6 +426,20 @@ def main() -> None:
                         "val/ar_fine_acc": float(va["ar_fine_acc"]),
                         "val/ar_on_boundary_acc": float(va["ar_on_boundary_acc"]),
                         "val/ar_off_boundary_acc": float(va["ar_off_boundary_acc"]),
+                        **{
+                            f"val/acc_k{k}": float(v)
+                            for k, v in sorted(
+                                ((int(key.replace("acc_k", "")), value) for key, value in va.items() if key.startswith("acc_k")),
+                                key=lambda x: x[0],
+                            )
+                        },
+                        **{
+                            f"val/ar_acc_k{k}": float(v)
+                            for k, v in sorted(
+                                ((int(key.replace("ar_acc_k", "")), value) for key, value in va.items() if key.startswith("ar_acc_k")),
+                                key=lambda x: x[0],
+                            )
+                        },
                         "val/epoch": float(epoch),
                     },
                     step=global_step,
@@ -401,7 +459,7 @@ def main() -> None:
                     best_val = va["ce"]
                     save_checkpoint(os.path.join(ckpt_dir, "best.pt"), payload)
 
-                ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 0) or 0)
+                ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 10) or 10)
                 if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
                     save_checkpoint(os.path.join(ckpt_dir, f"epoch_{epoch:03d}.pt"), payload)
     finally:
