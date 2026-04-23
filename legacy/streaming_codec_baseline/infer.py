@@ -25,7 +25,13 @@ class EncodecDecoder:
 
     @torch.inference_mode()
     def decode_from_codes(self, codes: torch.Tensor) -> torch.Tensor:
-        audio_codes = codes.transpose(0, 1).unsqueeze(0).to(self.device)
+        # transformers EnCodec expects audio_codes shaped as:
+        #   [batch, channels, codebooks, frames]
+        # Our step-level codes are typically [frames, codebooks] (S,K) or (T,K).
+        if codes.dim() != 2:
+            raise RuntimeError(f"Expected codes with dim=2 [frames, codebooks], got shape={tuple(codes.shape)}")
+
+        audio_codes = codes.transpose(0, 1).unsqueeze(0).unsqueeze(0).to(self.device)
         audio_scales = [None]
 
         try:

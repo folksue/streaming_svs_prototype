@@ -137,6 +137,9 @@ def main() -> None:
                 if va["ce"] < best_val:
                     best_val = va["ce"]
                     save_checkpoint(os.path.join(cfg["paths"]["checkpoints"], "best.pt"), payload)
+                ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 0) or 0)
+                if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
+                    save_checkpoint(os.path.join(cfg["paths"]["checkpoints"], f"epoch_{epoch:03d}.pt"), payload)
     finally:
         logger.close()
 
