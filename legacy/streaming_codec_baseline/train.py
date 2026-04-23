@@ -14,7 +14,7 @@ from model import StreamingSVSModel
 from utils import (
     WarmupCosine,
     get_device,
-    load_yaml,
+    load_merged_yaml,
     masked_cross_entropy,
     masked_code_accuracy,
     normalize_config_paths,
@@ -25,8 +25,23 @@ from utils import (
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default="config.yaml")
+    p.add_argument("--config", action="append", default=None, help="Can be passed multiple times; later files override earlier ones.")
+    p.add_argument("--data-config", type=str, default=None)
+    p.add_argument("--model-config", type=str, default=None)
     return p.parse_args()
+
+
+def resolve_config_paths(args: argparse.Namespace) -> list[str]:
+    paths: list[str] = []
+    if args.config:
+        paths.extend(args.config)
+    if args.data_config:
+        paths.append(args.data_config)
+    if args.model_config:
+        paths.append(args.model_config)
+    if not paths:
+        paths = ["config.yaml"]
+    return paths
 
 
 def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_size: int) -> StreamingSVSModel:
@@ -192,7 +207,7 @@ def run_validation(model, loader, dev):
 def main() -> None:
     args = parse_args()
     repo_root = Path(__file__).resolve().parent
-    cfg = normalize_config_paths(load_yaml(args.config), repo_root=repo_root)
+    cfg = normalize_config_paths(load_merged_yaml(resolve_config_paths(args)), repo_root=repo_root)
     set_seed(cfg["seed"])
 
     dev = get_device()

@@ -1,0 +1,27 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  tokens_per_step: 1
+  encodec_model_name: facebook/encodec_24khz
+
+train:
+  epochs: 80
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 2000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+
+logging:
+  backends: ["console", "tensorboard"]
+  tensorboard_dir: artifacts/runs/tiny_4m_4ds
+  wandb_project: streaming-svs
+  run_name: tiny-4m-4ds
+  wandb_mode: offline
+
+paths:
+  checkpoints: artifacts/checkpoints/tiny_4m_4ds
+  outputs: artifacts/outputs/tiny_4m_4ds

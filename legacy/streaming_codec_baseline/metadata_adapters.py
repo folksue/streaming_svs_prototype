@@ -9,8 +9,10 @@ from utils import ensure_dir, load_json, save_json
 STANDARD_MANIFEST = "manifest"
 M4SINGER_ADAPTER = "m4singer"
 OPENCPOP_ADAPTER = "opencpop"
+KISING_ADAPTER = "kising"
 SOULX_SINGER_EVAL_ADAPTER = "soulx-singer-eval"
 ACE_OPENCPOP_SEGMENTS_ADAPTER = "ace-opencpop-segments"
+ACE_KISING_SEGMENTS_ADAPTER = "ace-kising-segments"
 
 
 def normalize_adapter_name(name: str | None) -> str:
@@ -23,8 +25,10 @@ def adapter_needs_phoneme_vocab(adapter_name: str) -> bool:
     return normalize_adapter_name(adapter_name) in {
         M4SINGER_ADAPTER,
         OPENCPOP_ADAPTER,
+        KISING_ADAPTER,
         SOULX_SINGER_EVAL_ADAPTER,
         ACE_OPENCPOP_SEGMENTS_ADAPTER,
+        ACE_KISING_SEGMENTS_ADAPTER,
     }
 
 
@@ -43,9 +47,13 @@ def load_manifest_entries(
         return load_m4singer_entries(manifest_path, audio_root=audio_root)
     if adapter == OPENCPOP_ADAPTER:
         return load_opencpop_entries(manifest_path, audio_root=audio_root)
+    if adapter == KISING_ADAPTER:
+        return load_kising_entries(manifest_path, audio_root=audio_root)
     if adapter == SOULX_SINGER_EVAL_ADAPTER:
         return load_soulx_singer_eval_entries(manifest_path, audio_root=audio_root)
     if adapter == ACE_OPENCPOP_SEGMENTS_ADAPTER:
+        return load_ace_opencpop_segments_entries(manifest_path, audio_root=audio_root)
+    if adapter == ACE_KISING_SEGMENTS_ADAPTER:
         return load_ace_opencpop_segments_entries(manifest_path, audio_root=audio_root)
     raise ValueError(f"Unsupported manifest adapter: {adapter_name}")
 
@@ -321,6 +329,14 @@ def load_soulx_singer_eval_entries(manifest_path: str, audio_root: str | None = 
             }
         )
     return entries
+
+
+def load_kising_entries(manifest_path: str, audio_root: str | None = None) -> List[Dict[str, Any]]:
+    """
+    KiSing adapter.
+    Current implementation follows the OpenCpop text metadata schema.
+    """
+    return load_opencpop_entries(manifest_path, audio_root=audio_root)
 
 
 def load_ace_opencpop_segments_entries(manifest_path: str, audio_root: str | None = None) -> List[Dict[str, Any]]:

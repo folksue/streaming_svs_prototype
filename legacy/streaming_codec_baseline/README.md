@@ -21,8 +21,8 @@ Research prototype for chunk-wise streaming singing synthesis.
 ## Files / 文件说明
 - `preprocess_encodec.py`: waveform + alignment manifest -> chunk sequence cache (`.pt`)
 - `preprocess_encodec.py`：音频与对齐标注 -> 分块序列缓存（`.pt`）
-- `metadata_adapters.py`: real dataset metadata adapters for M4Singer / OpenCpop
-- `metadata_adapters.py`：M4Singer / OpenCpop 真实数据元信息适配器
+- `metadata_adapters.py`: real dataset metadata adapters for M4Singer / OpenCpop / KiSing / ACE segments
+- `metadata_adapters.py`：M4Singer / OpenCpop / KiSing / ACE 分段数据元信息适配器
 - `dataset.py`: variable-length sequence dataset + padding/mask collate
 - `dataset.py`：变长序列数据集与 padding/mask 拼批
 - `model.py`: condition encoder + previous-chunk context encoder + discrete codec classifier
@@ -162,8 +162,10 @@ Adapters can also build this schema from real dataset metadata:
 - `manifest`: existing JSON list in the schema above
 - `m4singer`: real `meta.json` with `item_name / phs / ph_dur / notes / notes_dur`
 - `opencpop`: OpenCpop `transcriptions.txt`-style metadata
+- `kising`: KiSing metadata (current parser follows OpenCpop-style text format)
 - `soulx-singer-eval`: JSON or JSONL with GTSinger-style `phs / ph_dur / notes / notes_dur`
 - `ace-opencpop-segments`: ACE-OpenCpop segment JSON (`segment_id/phn/note_*`) from HF export or sample downloader
+- `ace-kising-segments`: ACE-KiSing segment JSON (same parser as ACE-OpenCpop segments)
 
 For real metadata adapters, preprocessing builds/reuses phoneme vocab at `data.phoneme_vocab_path`.
 对于真实数据适配器，预处理会在 `data.phoneme_vocab_path` 生成/复用音素词表。
@@ -289,6 +291,25 @@ python preprocess_encodec.py --config config.yaml --split both
 python train.py --config config.yaml
 python infer.py --checkpoint artifacts/checkpoints/best.pt --cache artifacts/data/valid_chunks.pt --index 0 --decode_wav
 ```
+
+Split model/data config example / 模型配置与数据配置拆分示例：
+```bash
+python preprocess_encodec.py \
+  --config configs/base/runtime_tiny.yaml \
+  --data-config configs/data/mix_4ds_template.yaml \
+  --model-config configs/model/tiny_4m.yaml \
+  --split both
+
+python train.py \
+  --config configs/base/runtime_tiny.yaml \
+  --data-config configs/data/mix_4ds_template.yaml \
+  --model-config configs/model/tiny_4m.yaml
+```
+
+The same scripts are provided in:
+同样的脚本已提供：
+- `scripts/run_preprocess_tiny_4m_4ds.sh`
+- `scripts/run_train_tiny_4m_4ds.sh`
 
 ## Notes / 说明
 - This is a research baseline, not production SVS.

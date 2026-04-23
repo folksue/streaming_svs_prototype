@@ -1,0 +1,51 @@
+data:
+  # Four-dataset mixed training template:
+  # 1) OpenCpop
+  # 2) M4Singer
+  # 3) ACE-OpenCpop segments
+  # 4) KiSing
+  train_sources:
+    - name: opencpop
+      manifest: /abs/path/to/opencpop/train.txt
+      adapter: opencpop
+      audio_root: /abs/path/to/opencpop/wavs
+    - name: m4singer
+      manifest: /abs/path/to/m4singer/meta_train.json
+      adapter: m4singer
+      audio_root: /abs/path/to/M4Singer
+    - name: ace_opencpop
+      manifest: /abs/path/to/ace_opencpop/train_segments.json
+      adapter: ace-opencpop-segments
+      audio_root: /abs/path/to/ace_opencpop/audio
+    - name: kising
+      manifest: /abs/path/to/kising/train.txt
+      adapter: kising
+      audio_root: /abs/path/to/kising/wavs
+
+  valid_sources:
+    - name: opencpop_valid
+      manifest: /abs/path/to/opencpop/valid.txt
+      adapter: opencpop
+      audio_root: /abs/path/to/opencpop/wavs
+    - name: m4singer_valid
+      manifest: /abs/path/to/m4singer/meta_valid.json
+      adapter: m4singer
+      audio_root: /abs/path/to/M4Singer
+    - name: ace_opencpop_valid
+      manifest: /abs/path/to/ace_opencpop/valid_segments.json
+      adapter: ace-opencpop-segments
+      audio_root: /abs/path/to/ace_opencpop/audio
+    - name: kising_valid
+      manifest: /abs/path/to/kising/valid.txt
+      adapter: kising
+      audio_root: /abs/path/to/kising/wavs
+
+  auto_split_valid: false
+  valid_ratio: 0.05
+  min_valid_items: 1
+  phoneme_vocab_path: artifacts/data/mix_4ds_phoneme_vocab.json
+  train_cache: artifacts/data/mix_4ds_train_steps.pt
+  valid_cache: artifacts/data/mix_4ds_valid_steps.pt
+  batch_size: 8
+  num_workers: 2
+  max_seq_len: 256

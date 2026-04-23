@@ -1,0 +1,31 @@
+model:
+  # Tiny model (~4.34M params when K=8, V=1024, S=1).
+  note_vocab_size: 256
+  note_emb_dim: 64
+  phoneme_vocab_size: 1024
+  phoneme_emb_dim: 64
+  slur_emb_dim: 8
+  phone_progress_bins: 8
+  phone_progress_emb_dim: 16
+  cond_dim: 128
+  token_emb_dim: 96
+  prev_step_dim: 128
+  model_dim: 192
+  attn_heads: 6
+  attn_layers: 2
+  history_window: 16
+  num_blocks: 2
+  audio_history_window: 64
+  control_encoder_type: mlp
+  control_conv_layers: 0
+  control_conv_hidden_mult: 2.0
+  control_conv_kernel_size: 7
+  control_conv_dilation: 1
+  # ===== Ablation knobs (keep future ablation params in this block) =====
+  ablation_prefix_pad_steps: 0
+  # ===== End ablation knobs =====
+  rope_base: 10000.0
+  ffn_mult: 2.6666666667
+  attn_bias: false
+  ffn_bias: false
+  norm_eps: 1.0e-6

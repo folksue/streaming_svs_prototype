@@ -6,7 +6,7 @@ import os
 import random
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 import numpy as np
 import torch
@@ -23,6 +23,26 @@ def set_seed(seed: int) -> None:
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def deep_merge_dict(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def load_merged_yaml(paths: Iterable[str]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for path in paths:
+        cfg = load_yaml(path)
+        if not isinstance(cfg, dict):
+            raise ValueError(f"Config must be a YAML object: {path}")
+        merged = deep_merge_dict(merged, cfg)
+    return merged
 
 
 def get_repo_root() -> Path:
@@ -55,6 +75,22 @@ def normalize_config_paths(cfg: Dict[str, Any], repo_root: Path | None = None) -
     ):
         if key in data_cfg and data_cfg[key] is not None:
             data_cfg[key] = resolve_repo_path(data_cfg[key], root)
+
+    for split_key in ("train_sources", "valid_sources"):
+        source_list = data_cfg.get(split_key)
+        if not isinstance(source_list, list):
+            continue
+        normalized_sources = []
+        for source in source_list:
+            if not isinstance(source, dict):
+                normalized_sources.append(source)
+                continue
+            source_item = deepcopy(source)
+            for source_path_key in ("manifest", "audio_root"):
+                if source_path_key in source_item and source_item[source_path_key] is not None:
+                    source_item[source_path_key] = resolve_repo_path(source_item[source_path_key], root)
+            normalized_sources.append(source_item)
+        data_cfg[split_key] = normalized_sources
 
     logging_cfg = resolved.get("logging", {})
     if "tensorboard_dir" in logging_cfg and logging_cfg["tensorboard_dir"] is not None:

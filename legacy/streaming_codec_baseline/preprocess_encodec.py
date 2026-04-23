@@ -17,7 +17,7 @@ from metadata_adapters import (
     build_or_load_phoneme_vocab,
     load_manifest_entries,
 )
-from utils import ensure_dir, get_device, load_yaml, normalize_config_paths, set_seed
+from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_paths, set_seed
 
 CACHE_FORMAT = "svs_step_codes"
 CACHE_FORMAT_VERSION = 3
@@ -310,19 +310,51 @@ def build_cache(
     }
 
 
-def get_split_paths(cfg: Dict[str, Any], split_name: str) -> tuple[str, str, str, str | None]:
+def get_split_cache_path(cfg: Dict[str, Any], split_name: str) -> str:
     data_cfg = cfg["data"]
+    return str(data_cfg[f"{split_name}_cache"])
+
+
+def get_split_sources(cfg: Dict[str, Any], split_name: str) -> List[Dict[str, Any]]:
+    data_cfg = cfg["data"]
+    list_key = f"{split_name}_sources"
+    source_list = data_cfg.get(list_key)
+
+    if isinstance(source_list, list) and source_list:
+        normalized_sources: List[Dict[str, Any]] = []
+        for idx, source in enumerate(source_list):
+            if not isinstance(source, dict):
+                raise ValueError(f"data.{list_key}[{idx}] must be a mapping")
+            manifest_path = source.get("manifest")
+            if not manifest_path:
+                raise ValueError(f"data.{list_key}[{idx}].manifest is required")
+            normalized_sources.append(
+                {
+                    "manifest_path": str(manifest_path),
+                    "adapter_name": str(source.get("adapter", data_cfg.get("manifest_adapter", "manifest"))),
+                    "audio_root": source.get("audio_root"),
+                    "source_name": str(source.get("name", f"{split_name}_src{idx}")),
+                }
+            )
+        return normalized_sources
+
     manifest_path = data_cfg[f"{split_name}_manifest"]
-    cache_path = data_cfg[f"{split_name}_cache"]
     adapter_name = data_cfg.get(f"{split_name}_manifest_adapter", data_cfg.get("manifest_adapter", "manifest"))
     audio_root = data_cfg.get(f"{split_name}_audio_root")
-    return manifest_path, cache_path, adapter_name, audio_root
+    return [
+        {
+            "manifest_path": manifest_path,
+            "adapter_name": adapter_name,
+            "audio_root": audio_root,
+            "source_name": split_name,
+        }
+    ]
 
 
 def maybe_auto_split_entries(
     cfg: Dict[str, Any],
     split_entries: Dict[str, List[Dict[str, Any]]],
-    adapter_names: Dict[str, str],
+    adapter_names: Dict[str, List[str]],
 ) -> Dict[str, List[Dict[str, Any]]]:
     data_cfg = cfg["data"]
     if "train" not in split_entries or "valid" not in split_entries:
@@ -356,7 +388,7 @@ def maybe_auto_split_entries(
 
     split_entries["train"] = train_after_split
     split_entries["valid"] = valid_entries
-    adapter_names["valid"] = adapter_names.get("train", adapter_names.get("valid", "manifest"))
+    adapter_names["valid"] = adapter_names.get("train", adapter_names.get("valid", ["manifest"]))
     print(
         f"Auto-split validation set from training entries: "
         f"train={len(train_after_split)} valid={len(valid_entries)} ratio={valid_ratio:.4f}"
@@ -371,21 +403,46 @@ def stable_hash_score(text: str, seed: int) -> int:
 
 def prepare_entries(cfg: Dict[str, Any], split_names: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     split_entries: Dict[str, List[Dict[str, Any]]] = {}
-    adapter_names: Dict[str, str] = {}
+    adapter_names: Dict[str, List[str]] = {}
 
     for split_name in split_names:
-        manifest_path, _, adapter_name, audio_root = get_split_paths(cfg, split_name)
-        entries = load_manifest_entries(
-            manifest_path=manifest_path,
-            adapter_name=adapter_name,
-            audio_root=audio_root,
-        )
-        split_entries[split_name] = entries
-        adapter_names[split_name] = adapter_name
+        merged_entries: List[Dict[str, Any]] = []
+        source_adapters: List[str] = []
+        seen_utt_ids: set[str] = set()
+        for source in get_split_sources(cfg, split_name):
+            manifest_path = source["manifest_path"]
+            adapter_name = source["adapter_name"]
+            audio_root = source.get("audio_root")
+            source_name = source["source_name"]
+            source_entries = load_manifest_entries(
+                manifest_path=manifest_path,
+                adapter_name=adapter_name,
+                audio_root=audio_root,
+            )
+            for entry in source_entries:
+                uid = str(entry.get("utt_id", ""))
+                if uid in seen_utt_ids:
+                    item = dict(entry)
+                    item["utt_id"] = f"{source_name}:{uid}"
+                    merged_entries.append(item)
+                    seen_utt_ids.add(item["utt_id"])
+                else:
+                    merged_entries.append(entry)
+                    seen_utt_ids.add(uid)
+            source_adapters.append(adapter_name)
+        split_entries[split_name] = merged_entries
+        adapter_names[split_name] = source_adapters
 
     split_entries = maybe_auto_split_entries(cfg, split_entries, adapter_names)
 
-    needs_vocab = any(adapter_needs_phoneme_vocab(name) or any("phoneme_symbols" in x for x in split_entries[split]) for split, name in adapter_names.items())
+    needs_vocab = False
+    for split_name, names in adapter_names.items():
+        if any(adapter_needs_phoneme_vocab(name) for name in names):
+            needs_vocab = True
+            break
+        if any("phoneme_symbols" in x for x in split_entries[split_name]):
+            needs_vocab = True
+            break
     if needs_vocab:
         vocab_path = cfg["data"].get("phoneme_vocab_path", "data/phoneme_vocab.json")
         allow_create = "train" in split_names
@@ -400,14 +457,29 @@ def prepare_entries(cfg: Dict[str, Any], split_names: List[str]) -> Dict[str, Li
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default="config.yaml")
+    p.add_argument("--config", action="append", default=None, help="Can be passed multiple times; later files override earlier ones.")
+    p.add_argument("--data-config", type=str, default=None)
+    p.add_argument("--model-config", type=str, default=None)
     p.add_argument("--split", type=str, choices=["train", "valid", "both"], default="both")
     return p.parse_args()
 
 
+def resolve_config_paths(args: argparse.Namespace) -> List[str]:
+    paths: List[str] = []
+    if args.config:
+        paths.extend(args.config)
+    if args.data_config:
+        paths.append(args.data_config)
+    if args.model_config:
+        paths.append(args.model_config)
+    if not paths:
+        paths = ["config.yaml"]
+    return paths
+
+
 def main() -> None:
     args = parse_args()
-    cfg = normalize_config_paths(load_yaml(args.config))
+    cfg = normalize_config_paths(load_merged_yaml(resolve_config_paths(args)))
     set_seed(cfg["seed"])
 
     split_names: List[str] = []
@@ -420,10 +492,10 @@ def main() -> None:
 
     train_meta: Optional[Dict[str, int]] = None
     if args.split in ("train", "both"):
-        _, cache_path, _, _ = get_split_paths(cfg, "train")
+        cache_path = get_split_cache_path(cfg, "train")
         train_meta = build_cache(cfg, split_entries["train"], cache_path, split_name="train")
     if args.split in ("valid", "both"):
-        _, cache_path, _, _ = get_split_paths(cfg, "valid")
+        cache_path = get_split_cache_path(cfg, "valid")
         tokens_per_step_override = None
         if train_meta is not None:
             tokens_per_step_override = int(train_meta["tokens_per_step"])
