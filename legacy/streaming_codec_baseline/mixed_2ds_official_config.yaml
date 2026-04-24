@@ -4,6 +4,8 @@ audio:
   sample_rate: 24000
   tokens_per_step: 1
   encodec_model_name: facebook/encodec_24khz
+  encodec_bandwidth: 6.0
+  expected_num_codebooks: 8
 
 data:
   train_manifest: artifacts/data/mixed_official_train_manifest.json

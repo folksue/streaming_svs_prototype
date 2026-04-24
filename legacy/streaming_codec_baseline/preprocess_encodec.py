@@ -46,9 +46,10 @@ class FrozenEncodec:
     We keep EnCodec frozen and only use it for preprocessing/decoding.
     """
 
-    def __init__(self, model_name: str, device: torch.device):
+    def __init__(self, model_name: str, device: torch.device, bandwidth: float | None = None):
         self.device = device
         self.model_name = model_name
+        self.bandwidth = None if bandwidth is None else float(bandwidth)
 
         try:
             from transformers import EncodecModel  # type: ignore
@@ -74,7 +75,13 @@ class FrozenEncodec:
             wav = wav.unsqueeze(0)
 
         x = wav.unsqueeze(0).to(self.device)  # [1, 1, samples]
-        encoded = self.model.encode(x)
+        if self.bandwidth is None:
+            encoded = self.model.encode(x)
+        else:
+            try:
+                encoded = self.model.encode(x, bandwidth=self.bandwidth)
+            except TypeError:
+                encoded = self.model.encode(x)
 
         codes = encoded.audio_codes
         if codes.dim() == 4:
@@ -246,7 +253,13 @@ def build_cache(
     tokens_per_step_override: Optional[int] = None,
 ) -> Dict[str, int]:
     dev = get_device()
-    encodec = FrozenEncodec(cfg["audio"]["encodec_model_name"], dev)
+    encodec = FrozenEncodec(
+        cfg["audio"]["encodec_model_name"],
+        dev,
+        bandwidth=cfg["audio"].get("encodec_bandwidth"),
+    )
+    expected_num_codebooks = cfg["audio"].get("expected_num_codebooks")
+    expected_num_codebooks = None if expected_num_codebooks is None else int(expected_num_codebooks)
 
     items: List[StepItem] = []
     resolved_tokens_per_step: Optional[int] = tokens_per_step_override
@@ -263,6 +276,13 @@ def build_cache(
         )
         if item is None:
             continue
+
+        if expected_num_codebooks is not None and int(item.codes.size(-1)) != expected_num_codebooks:
+            raise ValueError(
+                f"Expected {expected_num_codebooks} codebooks from EnCodec, "
+                f"but got {int(item.codes.size(-1))}. "
+                f"Check audio.encodec_bandwidth / model."
+            )
 
         if resolved_tokens_per_step is None:
             resolved_tokens_per_step = int(item.codes.size(1))
@@ -294,6 +314,7 @@ def build_cache(
             "num_codebooks": num_codebooks,
             "tokens_per_step": tokens_per_step,
             "encodec_model": cfg["audio"]["encodec_model_name"],
+            "encodec_bandwidth": cfg["audio"].get("encodec_bandwidth"),
             "sample_rate": cfg["audio"]["sample_rate"],
             "codebook_size": encodec.codebook_size,
             "phone_progress_bins": int(cfg["model"]["phone_progress_bins"]),
