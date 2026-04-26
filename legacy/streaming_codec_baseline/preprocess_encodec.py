@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import hashlib
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import torch
 import torchaudio
@@ -21,6 +23,7 @@ from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_pat
 
 CACHE_FORMAT = "svs_step_codes"
 CACHE_FORMAT_VERSION = 3
+SHARDED_CACHE_FORMAT_VERSION = 4
 
 
 @dataclass
@@ -65,6 +68,11 @@ class FrozenEncodec:
 
         codebook_size = getattr(self.model.config, "codebook_size", 1024)
         self.codebook_size = int(codebook_size)
+        upsampling_ratios = list(getattr(self.model.config, "upsampling_ratios", [1]))
+        frame_stride = 1
+        for ratio in upsampling_ratios:
+            frame_stride *= int(ratio)
+        self.frame_stride = max(frame_stride, 1)
 
     @torch.inference_mode()
     def encode(self, wav: torch.Tensor, sr: int) -> torch.Tensor:
@@ -106,6 +114,42 @@ class FrozenEncodec:
         if codes.size(0) <= codes.size(1):
             codes = codes.transpose(0, 1)
         return codes.contiguous().long().cpu()
+
+    @torch.inference_mode()
+    def encode_batch(self, wavs: List[torch.Tensor], sr: int) -> List[torch.Tensor]:
+        """Returns a list of discrete EnCodec codes, each shaped [T, K]."""
+        if not wavs:
+            return []
+
+        lengths = [int(wav.size(-1)) for wav in wavs]
+        max_len = max(lengths)
+        batch = torch.zeros(len(wavs), 1, max_len, dtype=wavs[0].dtype, device=self.device)
+        padding_mask = torch.zeros(len(wavs), max_len, dtype=torch.bool, device=self.device)
+
+        for idx, wav in enumerate(wavs):
+            mono = wav
+            if mono.dim() == 2:
+                mono = mono.mean(dim=0, keepdim=True)
+            if mono.dim() == 1:
+                mono = mono.unsqueeze(0)
+            n = int(mono.size(-1))
+            batch[idx, :, :n] = mono.to(self.device)
+            padding_mask[idx, :n] = True
+
+        encoded = self.model.encode(batch, padding_mask=padding_mask, bandwidth=self.bandwidth)
+        codes = encoded.audio_codes
+
+        if codes.dim() != 4:
+            raise RuntimeError(f"Unexpected batched EnCodec code shape: {tuple(codes.shape)}")
+        if codes.size(0) != 1:
+            raise RuntimeError(f"Unexpected leading EnCodec batch shape: {tuple(codes.shape)}")
+
+        codes = codes.squeeze(0).permute(0, 2, 1).contiguous()  # [B, T, K]
+        outputs: List[torch.Tensor] = []
+        for idx, num_samples in enumerate(lengths):
+            num_frames = max(1, (num_samples + self.frame_stride - 1) // self.frame_stride)
+            outputs.append(codes[idx, :num_frames, :].long().cpu())
+        return outputs
 
 
 def find_active_interval(t: float, intervals: List[List[float]]) -> int:
@@ -231,7 +275,45 @@ def step_sequence(
     )
 
 
+_PARQUET_AUDIO_CACHE: dict[str, list[dict]] = {}
+
+
+def parse_parquet_audio_uri(path: str) -> tuple[str, int]:
+    if not path.startswith("parquet://"):
+        raise ValueError(f"Not a parquet audio URI: {path}")
+    payload = path[len("parquet://") :]
+    parquet_path, row_idx = payload.rsplit("::", 1)
+    return unquote(parquet_path), int(row_idx)
+
+
+def load_parquet_audio_bytes(path: str) -> bytes:
+    parquet_path, row_idx = parse_parquet_audio_uri(path)
+    rows = _PARQUET_AUDIO_CACHE.get(parquet_path)
+    if rows is None:
+        import pyarrow.parquet as pq  # type: ignore
+
+        table = pq.read_table(parquet_path, columns=["audio"])
+        rows = table.column("audio").to_pylist()
+        _PARQUET_AUDIO_CACHE.clear()
+        _PARQUET_AUDIO_CACHE[parquet_path] = rows
+    item = rows[row_idx]
+    if not isinstance(item, dict) or not isinstance(item.get("bytes"), (bytes, bytearray)):
+        raise RuntimeError(f"Invalid parquet audio payload at {parquet_path} row {row_idx}")
+    return bytes(item["bytes"])
+
+
 def load_audio(path: str, target_sr: int) -> torch.Tensor:
+    if str(path).startswith("parquet://"):
+        audio_bytes = load_parquet_audio_bytes(str(path))
+        wav_np, sr = sf.read(io.BytesIO(audio_bytes), always_2d=True)
+        wav = torch.from_numpy(wav_np).transpose(0, 1).float()
+        if wav.numel() == 0 or wav.size(-1) == 0:
+            raise RuntimeError(f"Decoded empty audio from parquet source: {path}")
+        if wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != target_sr:
+            wav = torchaudio.functional.resample(wav, sr, target_sr)
+        return wav
     try:
         wav, sr = torchaudio.load(path)
     except Exception:
@@ -240,6 +322,8 @@ def load_audio(path: str, target_sr: int) -> torch.Tensor:
 
     if wav.size(0) > 1:
         wav = wav.mean(dim=0, keepdim=True)
+    if wav.numel() == 0 or wav.size(-1) == 0:
+        raise RuntimeError(f"Decoded empty audio from source: {path}")
     if sr != target_sr:
         wav = torchaudio.functional.resample(wav, sr, target_sr)
     return wav
@@ -263,30 +347,62 @@ def build_cache(
 
     items: List[StepItem] = []
     resolved_tokens_per_step: Optional[int] = tokens_per_step_override
+    preprocess_batch_size = max(1, int(cfg["audio"].get("preprocess_batch_size", 1)))
+    skipped_empty_audio = 0
+    skipped_step_sequence = 0
+    pending_utts: List[Dict[str, Any]] = []
+    pending_wavs: List[torch.Tensor] = []
+
+    def flush_pending() -> None:
+        nonlocal resolved_tokens_per_step, skipped_step_sequence
+        if not pending_wavs:
+            return
+        code_batches = (
+            encodec.encode_batch(pending_wavs, cfg["audio"]["sample_rate"])
+            if preprocess_batch_size > 1
+            else [encodec.encode(pending_wavs[0], cfg["audio"]["sample_rate"])]
+        )
+        for batch_utt, code_frames in zip(pending_utts, code_batches):
+            if expected_num_codebooks is not None and int(code_frames.size(-1)) != expected_num_codebooks:
+                raise ValueError(
+                    f"Expected {expected_num_codebooks} codebooks from EnCodec, "
+                    f"but got {int(code_frames.size(-1))}. "
+                    f"Check audio.encodec_bandwidth / model."
+                )
+            item = step_sequence(
+                utt=batch_utt,
+                code_frames=code_frames,
+                tokens_per_step=cfg["audio"]["tokens_per_step"],
+                phone_progress_bins=cfg["model"]["phone_progress_bins"],
+                tokens_per_step_override=resolved_tokens_per_step,
+            )
+            if item is None:
+                skipped_step_sequence += 1
+                continue
+            if resolved_tokens_per_step is None:
+                resolved_tokens_per_step = int(item.codes.size(1))
+            items.append(item)
+        pending_utts.clear()
+        pending_wavs.clear()
 
     for utt in tqdm(entries, desc=f"preprocess {split_name}"):
-        wav = load_audio(utt["audio_path"], cfg["audio"]["sample_rate"])
-        code_frames = encodec.encode(wav, cfg["audio"]["sample_rate"])
-        item = step_sequence(
-            utt=utt,
-            code_frames=code_frames,
-            tokens_per_step=cfg["audio"]["tokens_per_step"],
-            phone_progress_bins=cfg["model"]["phone_progress_bins"],
-            tokens_per_step_override=resolved_tokens_per_step,
-        )
-        if item is None:
-            continue
+        try:
+            wav = load_audio(utt["audio_path"], cfg["audio"]["sample_rate"])
+        except RuntimeError as exc:
+            if "empty audio" in str(exc).lower():
+                skipped_empty_audio += 1
+                print(
+                    f"skip empty audio: split={split_name} utt={utt.get('utt_id', '<unknown>')} "
+                    f"path={utt.get('audio_path', '<missing>')}"
+                )
+                continue
+            raise
+        pending_utts.append(utt)
+        pending_wavs.append(wav)
+        if len(pending_wavs) >= preprocess_batch_size:
+            flush_pending()
 
-        if expected_num_codebooks is not None and int(item.codes.size(-1)) != expected_num_codebooks:
-            raise ValueError(
-                f"Expected {expected_num_codebooks} codebooks from EnCodec, "
-                f"but got {int(item.codes.size(-1))}. "
-                f"Check audio.encodec_bandwidth / model."
-            )
-
-        if resolved_tokens_per_step is None:
-            resolved_tokens_per_step = int(item.codes.size(1))
-        items.append(item)
+    flush_pending()
 
     if not items:
         raise RuntimeError(f"No usable items parsed for split={split_name}")
@@ -323,12 +439,60 @@ def build_cache(
     }
 
     ensure_dir(os.path.dirname(out_path) or ".")
-    torch.save(payload, out_path)
-    print(f"Saved cache: {out_path} | items={len(items)} | codebooks={num_codebooks} | S={tokens_per_step}")
+    shard_items = int(cfg["data"].get("cache_shard_items", 0) or 0)
+    if shard_items > 0:
+        save_sharded_cache(payload, out_path, items_per_shard=shard_items)
+    else:
+        torch.save(payload, out_path)
+    print(
+        f"Saved cache: {out_path} | items={len(items)} | codebooks={num_codebooks} | S={tokens_per_step} "
+        f"| skipped_empty_audio={skipped_empty_audio} | skipped_step_sequence={skipped_step_sequence}"
+    )
     return {
         "num_codebooks": num_codebooks,
         "tokens_per_step": tokens_per_step,
     }
+
+
+def save_sharded_cache(payload: Dict[str, Any], out_path: str, items_per_shard: int) -> None:
+    output_dir = out_path
+    if output_dir.endswith(".pt"):
+        output_dir = output_dir[: -len(".pt")] + "_sharded"
+    ensure_dir(output_dir)
+    shard_dir = os.path.join(output_dir, "shards")
+    ensure_dir(shard_dir)
+
+    items = payload["items"]
+    meta = dict(payload["meta"])
+    meta["cache_format_version"] = SHARDED_CACHE_FORMAT_VERSION
+
+    index: List[Dict[str, int]] = []
+    shards: List[Dict[str, Any]] = []
+    for shard_idx, start in enumerate(range(0, len(items), items_per_shard)):
+        shard_items_payload = items[start : start + items_per_shard]
+        shard_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}.pt")
+        torch.save({"items": shard_items_payload}, shard_path)
+        shards.append(
+            {
+                "path": shard_path,
+                "start_idx": start,
+                "length": len(shard_items_payload),
+            }
+        )
+        for item_idx in range(len(shard_items_payload)):
+            index.append({"shard_idx": shard_idx, "item_idx": item_idx})
+
+    torch.save(
+        {
+            "items": [],
+            "meta": meta,
+            "storage": "sharded",
+            "num_items": len(items),
+            "index": index,
+            "shards": shards,
+        },
+        os.path.join(output_dir, "index.pt"),
+    )
 
 
 def get_split_cache_path(cfg: Dict[str, Any], split_name: str) -> str:

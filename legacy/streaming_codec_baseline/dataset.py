@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from pathlib import Path
+import random
+from typing import Any, Dict, Iterator, List
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 CACHE_FORMAT = "svs_step_codes"
-SUPPORTED_CACHE_FORMAT_VERSION = 3
+SUPPORTED_CACHE_FORMAT_VERSION = 4
+LEGACY_CACHE_FORMAT_VERSION = 3
 
 
 @dataclass
@@ -22,20 +25,78 @@ class SequenceItem:
     note_off_boundary: torch.Tensor
 
 
+def is_sharded_cache_path(cache_path: str) -> bool:
+    path = Path(cache_path)
+    return path.is_dir() and (path / "index.pt").exists()
+
+
+def load_cache_payload(cache_path: str) -> Dict[str, Any]:
+    if is_sharded_cache_path(cache_path):
+        index_path = Path(cache_path) / "index.pt"
+        payload = torch.load(index_path, map_location="cpu", weights_only=False)
+        validate_cache_payload(payload, cache_path)
+        return payload
+    payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    validate_cache_payload(payload, cache_path)
+    return payload
+
+
 class SVSSequenceDataset(Dataset):
     def __init__(self, cache_path: str, max_seq_len: int | None = None):
-        payload = torch.load(cache_path, map_location="cpu")
-        validate_cache_payload(payload, cache_path)
-        self.items_raw = payload["items"]
-        self.meta = payload["meta"]
         self.cache_path = cache_path
         self.max_seq_len = max_seq_len
+        self._shard_cache_idx: int | None = None
+        self._shard_cache_items: List[Dict[str, Any]] | None = None
+
+        payload = load_cache_payload(cache_path)
+        self.meta = payload["meta"]
+        self.storage = str(payload.get("storage", "single"))
+        if self.storage == "sharded":
+            self.index = payload["index"]
+            self.shards = payload["shards"]
+            self.num_items = int(payload["num_items"])
+            self.items_raw = None
+        else:
+            self.items_raw = payload["items"]
+            self.index = None
+            self.shards = None
+            self.num_items = len(self.items_raw)
+
+    def shard_ranges(self) -> List[range]:
+        if self.storage != "sharded":
+            return [range(0, self.num_items)]
+        assert self.shards is not None
+        return [
+            range(int(shard["start_idx"]), int(shard["start_idx"]) + int(shard["length"]))
+            for shard in self.shards
+        ]
 
     def __len__(self) -> int:
-        return len(self.items_raw)
+        return self.num_items
+
+    def _load_shard_items(self, shard_idx: int) -> List[Dict[str, Any]]:
+        if self._shard_cache_idx == shard_idx and self._shard_cache_items is not None:
+            return self._shard_cache_items
+        assert self.shards is not None
+        shard_path = self.shards[shard_idx]["path"]
+        payload = torch.load(shard_path, map_location="cpu", weights_only=False)
+        items = payload["items"]
+        self._shard_cache_idx = shard_idx
+        self._shard_cache_items = items
+        return items
+
+    def _raw_item(self, idx: int) -> Dict[str, Any]:
+        if self.storage == "sharded":
+            assert self.index is not None
+            shard_idx = int(self.index[idx]["shard_idx"])
+            item_idx = int(self.index[idx]["item_idx"])
+            items = self._load_shard_items(shard_idx)
+            return items[item_idx]
+        assert self.items_raw is not None
+        return self.items_raw[idx]
 
     def __getitem__(self, idx: int) -> SequenceItem:
-        it = self.items_raw[idx]
+        it = self._raw_item(idx)
         codes = it["codes"].long()
         note_id = it["note_id"].long()
         phoneme = it["phoneme_id"].long()
@@ -129,9 +190,12 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
 
     items = payload["items"]
     meta = payload["meta"]
+    storage = str(payload.get("storage", "single"))
     if not isinstance(items, list):
-        raise ValueError(f"Invalid cache '{cache_path}': 'items' must be a list.")
-    if not items:
+        if storage != "sharded":
+            raise ValueError(f"Invalid cache '{cache_path}': 'items' must be a list.")
+        items = []
+    if storage == "single" and not items:
         raise ValueError(f"Invalid cache '{cache_path}': 'items' is empty.")
     if not isinstance(meta, dict):
         raise ValueError(f"Invalid cache '{cache_path}': 'meta' must be a dict.")
@@ -157,9 +221,10 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         raise ValueError(
             f"Unsupported cache format in '{cache_path}': expected '{CACHE_FORMAT}', got '{meta['cache_format']}'."
         )
-    if meta["cache_format_version"] != SUPPORTED_CACHE_FORMAT_VERSION:
+    if meta["cache_format_version"] not in (LEGACY_CACHE_FORMAT_VERSION, SUPPORTED_CACHE_FORMAT_VERSION):
         raise ValueError(
-            f"Unsupported cache format version in '{cache_path}': expected {SUPPORTED_CACHE_FORMAT_VERSION}, got {meta['cache_format_version']}."
+            f"Unsupported cache format version in '{cache_path}': expected one of "
+            f"({LEGACY_CACHE_FORMAT_VERSION}, {SUPPORTED_CACHE_FORMAT_VERSION}), got {meta['cache_format_version']}."
         )
     if meta["num_codebooks"] <= 0 or meta["tokens_per_step"] <= 0 or meta["codebook_size"] <= 0:
         raise ValueError(
@@ -172,7 +237,22 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
 
     expected_s = int(meta["tokens_per_step"])
     expected_k = int(meta["num_codebooks"])
-    for idx, item in enumerate(items):
+
+    if storage == "sharded":
+        _require_key(payload, "index", "payload", cache_path)
+        _require_key(payload, "shards", "payload", cache_path)
+        _require_key(payload, "num_items", "payload", cache_path)
+        if not isinstance(payload["index"], list):
+            raise ValueError(f"Invalid cache '{cache_path}': 'index' must be a list for sharded cache.")
+        if not isinstance(payload["shards"], list) or not payload["shards"]:
+            raise ValueError(f"Invalid cache '{cache_path}': 'shards' must be a non-empty list for sharded cache.")
+        if int(payload["num_items"]) <= 0:
+            raise ValueError(f"Invalid cache '{cache_path}': 'num_items' must be positive for sharded cache.")
+        items_to_validate = []
+    else:
+        items_to_validate = items
+
+    for idx, item in enumerate(items_to_validate):
         if not isinstance(item, dict):
             raise ValueError(f"Invalid cache '{cache_path}': items[{idx}] must be a dict.")
         for key in (
@@ -245,3 +325,22 @@ def validate_cache_meta_compatibility(train_meta: Dict, valid_meta: Dict, train_
                 f"{key} differs ({train_path}: {train_v}, {valid_path}: {valid_v}). "
                 "Please regenerate both caches with the same preprocess config."
             )
+
+
+class ShardAwareRandomSampler(Sampler[int]):
+    def __init__(self, dataset: SVSSequenceDataset, seed: int = 42):
+        self.dataset = dataset
+        self.seed = int(seed)
+
+    def __iter__(self) -> Iterator[int]:
+        rng = random.Random(self.seed)
+        shard_ranges = list(self.dataset.shard_ranges())
+        rng.shuffle(shard_ranges)
+        for shard_range in shard_ranges:
+            indices = list(shard_range)
+            rng.shuffle(indices)
+            for idx in indices:
+                yield idx
+
+    def __len__(self) -> int:
+        return len(self.dataset)

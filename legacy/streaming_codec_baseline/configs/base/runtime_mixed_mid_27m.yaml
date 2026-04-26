@@ -1,0 +1,23 @@
+__base__:
+  - runtime_default_100m.yaml
+
+train:
+  epochs: 300
+  lr: 1.5e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 2000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+  ckpt_interval_epochs: 10
+
+logging:
+  backends: ["console", "tensorboard"]
+  tensorboard_dir: artifacts/runs/mixed_mid_27m
+  run_name: mixed-mid-27m
+  wandb_mode: offline
+
+paths:
+  checkpoints: artifacts/checkpoints/mixed_mid_27m
+  outputs: artifacts/outputs/mixed_mid_27m

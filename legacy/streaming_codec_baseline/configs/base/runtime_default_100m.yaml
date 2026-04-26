@@ -1,0 +1,29 @@
+seed: 42
+
+audio:
+  sample_rate: 24000
+  tokens_per_step: 1
+  encodec_model_name: facebook/encodec_24khz
+  encodec_bandwidth: 6.0
+  expected_num_codebooks: 8
+
+train:
+  epochs: 80
+  lr: 2.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  warmup_steps: 1000
+  use_amp: true
+  log_interval: 20
+  val_interval: 1
+
+logging:
+  backends: ["console"]
+  tensorboard_dir: artifacts/runs/default
+  wandb_project: streaming-svs
+  run_name: null
+  wandb_mode: online
+
+paths:
+  checkpoints: artifacts/checkpoints
+  outputs: artifacts/outputs

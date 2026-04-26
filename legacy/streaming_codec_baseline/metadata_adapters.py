@@ -547,6 +547,8 @@ def resolve_audio_path(audio_path: Any, base_dir: str, fallback_relative: str | 
     candidate = str(audio_path).strip() if audio_path is not None and str(audio_path).strip() else fallback_relative
     if not candidate:
         raise ValueError("Could not resolve audio path")
+    if "://" in candidate:
+        return candidate
     if os.path.isabs(candidate):
         return candidate
     return os.path.normpath(os.path.join(base_dir, candidate))

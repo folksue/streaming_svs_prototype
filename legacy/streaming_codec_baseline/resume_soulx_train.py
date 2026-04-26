@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import math
 import os
 from pathlib import Path
@@ -7,24 +8,41 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import SVSSequenceDataset, collate_sequences
+from dataset import ShardAwareRandomSampler, SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
 from logging_utils import build_metric_logger
-from train import build_model, run_epoch, run_validation
-from utils import WarmupCosine, get_device, load_yaml, normalize_config_paths, save_checkpoint, set_seed
+from train import build_model, run_epoch, run_validation, resolve_config_paths
+from utils import WarmupCosine, get_device, load_merged_yaml, normalize_config_paths, save_checkpoint, set_seed
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", action="append", default=None, help="Can be passed multiple times; later files override earlier ones.")
+    p.add_argument("--data-config", type=str, default=None)
+    p.add_argument("--model-config", type=str, default=None)
+    p.add_argument("--checkpoint", type=str, default=None, help="Path to last.pt-style checkpoint to resume from.")
+    p.add_argument("--best-checkpoint", type=str, default=None, help="Optional best.pt path; defaults beside --checkpoint.")
+    return p.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
     repo_root = Path(__file__).resolve().parent
-    config_path = repo_root / "soulx_train_config.yaml"
-    ckpt_path = repo_root / "artifacts" / "checkpoints" / "soulx_train" / "last.pt"
-    best_ckpt_path = repo_root / "artifacts" / "checkpoints" / "soulx_train" / "best.pt"
-
-    cfg = normalize_config_paths(load_yaml(config_path), repo_root=repo_root)
+    cfg = normalize_config_paths(load_merged_yaml(resolve_config_paths(args)), repo_root=repo_root)
     set_seed(cfg["seed"])
     dev = get_device()
 
+    ckpt_dir = Path(cfg["paths"]["checkpoints"])
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else ckpt_dir / "last.pt"
+    best_ckpt_path = Path(args.best_checkpoint) if args.best_checkpoint else ckpt_dir / "best.pt"
+
     train_set = SVSSequenceDataset(cfg["data"]["train_cache"], max_seq_len=cfg["data"]["max_seq_len"])
     valid_set = SVSSequenceDataset(cfg["data"]["valid_cache"], max_seq_len=cfg["data"]["max_seq_len"])
+    validate_cache_meta_compatibility(
+        train_meta=train_set.meta,
+        valid_meta=valid_set.meta,
+        train_path=cfg["data"]["train_cache"],
+        valid_path=cfg["data"]["valid_cache"],
+    )
 
     num_codebooks = int(train_set.meta["num_codebooks"])
     tokens_per_step = int(train_set.meta["tokens_per_step"])
@@ -32,10 +50,12 @@ def main() -> None:
     cfg["_runtime_max_note_id"] = int(train_set.meta.get("max_note_id", 0))
     model = build_model(cfg, num_codebooks, tokens_per_step, codebook_size).to(dev)
 
+    train_sampler = ShardAwareRandomSampler(train_set, seed=int(cfg["seed"])) if getattr(train_set, "storage", "single") == "sharded" else None
     train_loader = DataLoader(
         train_set,
         batch_size=cfg["data"]["batch_size"],
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=cfg["data"]["num_workers"],
         collate_fn=collate_sequences,
     )
@@ -64,7 +84,7 @@ def main() -> None:
     optimizer.load_state_dict(ckpt["optimizer"])
 
     start_epoch = int(ckpt["epoch"]) + 1
-    global_step = int(ckpt["epoch"]) * max(len(train_loader), 1)
+    global_step = int(ckpt.get("global_step", int(ckpt["epoch"]) * max(len(train_loader), 1)))
     scheduler.step_id = global_step
 
     best_val = math.inf

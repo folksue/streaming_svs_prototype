@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
+from dataset import ShardAwareRandomSampler, SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
 from logging_utils import build_metric_logger
 from model import StreamingSVSModel
 from utils import (
@@ -330,10 +330,12 @@ def main() -> None:
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params / 1e6:.2f}M")
 
+    train_sampler = ShardAwareRandomSampler(train_set, seed=int(cfg["seed"])) if getattr(train_set, "storage", "single") == "sharded" else None
     train_loader = DataLoader(
         train_set,
         batch_size=cfg["data"]["batch_size"],
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=cfg["data"]["num_workers"],
         collate_fn=collate_sequences,
     )
@@ -365,9 +367,11 @@ def main() -> None:
     logger.log_metrics({"model/num_params": float(num_params)}, step=0)
     best_val = math.inf
     global_step = 0
+    current_epoch = 0
 
     try:
         for epoch in range(1, cfg["train"]["epochs"] + 1):
+            current_epoch = epoch
             tr = run_epoch(
                 model=model,
                 loader=train_loader,
@@ -401,6 +405,14 @@ def main() -> None:
                 step=global_step,
             )
 
+            train_per_k_str = " ".join(
+                f"train/acc_k{k}={tr[key]:.5f}"
+                for k, key in sorted(
+                    ((int(k.replace("acc_k", "")), k) for k in tr.keys() if k.startswith("acc_k")),
+                    key=lambda x: x[0],
+                )
+            )
+
             if epoch % cfg["train"]["val_interval"] == 0:
                 va = run_validation(model, valid_loader, dev)
                 val_per_k_str = " ".join(
@@ -421,6 +433,7 @@ def main() -> None:
                     f"epoch={epoch:03d} "
                     f"train/ce={tr['ce']:.5f} train/acc={tr['acc']:.5f} "
                     f"train/coarse_acc={tr['coarse_acc']:.5f} train/fine_acc={tr['fine_acc']:.5f} "
+                    f"{train_per_k_str} "
                     f"val/ce={va['ce']:.5f} val/acc={va['acc']:.5f} "
                     f"val/coarse_acc={va['coarse_acc']:.5f} val/fine_acc={va['fine_acc']:.5f} "
                     f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f} "
@@ -477,6 +490,23 @@ def main() -> None:
                 ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 10) or 10)
                 if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
                     save_checkpoint(os.path.join(ckpt_dir, f"epoch_{epoch:03d}.pt"), payload)
+    except KeyboardInterrupt:
+        interrupted_epoch = max(current_epoch - 1, 0)
+        payload = {
+            "epoch": interrupted_epoch,
+            "global_step": global_step,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "config": cfg,
+            "meta": train_set.meta,
+            "val": {"ce": best_val} if math.isfinite(best_val) else {},
+        }
+        save_checkpoint(os.path.join(ckpt_dir, "interrupt_last.pt"), payload)
+        print(
+            f"Interrupted during epoch={current_epoch}. "
+            f"Saved interrupt snapshot with resume_epoch={interrupted_epoch + 1} global_step={global_step}."
+        )
+        raise
     finally:
         logger.close()
 

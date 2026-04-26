@@ -1,0 +1,23 @@
+__base__:
+  - ../base/runtime_tiny.yaml
+  - ../data/mixed_official.yaml
+  - ../model/tiny_4m.yaml
+
+data:
+  batch_size: 512
+  num_workers: 12
+
+model:
+  phoneme_vocab_size: 256
+
+train:
+  epochs: 300
+  ckpt_interval_epochs: 10
+
+logging:
+  tensorboard_dir: artifacts/runs/mixed_tiny_4m
+  run_name: mixed-tiny-4m
+
+paths:
+  checkpoints: artifacts/checkpoints/mixed_tiny_4m
+  outputs: artifacts/outputs/mixed_tiny_4m

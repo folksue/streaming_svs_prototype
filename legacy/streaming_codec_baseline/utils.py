@@ -20,9 +20,41 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def load_yaml(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def load_yaml(path: str, _stack: tuple[str, ...] | None = None) -> Dict[str, Any]:
+    resolved_path = str(Path(path).resolve())
+    stack = _stack or ()
+    if resolved_path in stack:
+        cycle = " -> ".join([*stack, resolved_path])
+        raise ValueError(f"Config inheritance cycle detected: {cycle}")
+
+    with open(resolved_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        return {}
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config must be a YAML object: {resolved_path}")
+
+    base_refs = cfg.pop("__base__", None)
+    if base_refs is None:
+        return cfg
+
+    if isinstance(base_refs, (str, os.PathLike)):
+        base_list = [str(base_refs)]
+    elif isinstance(base_refs, list):
+        base_list = [str(item) for item in base_refs]
+    else:
+        raise ValueError(f"__base__ must be a string or list of strings: {resolved_path}")
+
+    merged: Dict[str, Any] = {}
+    base_dir = Path(resolved_path).parent
+    for base_ref in base_list:
+        base_path = Path(base_ref)
+        if not base_path.is_absolute():
+            base_path = (base_dir / base_path).resolve()
+        base_cfg = load_yaml(str(base_path), _stack=(*stack, resolved_path))
+        merged = deep_merge_dict(merged, base_cfg)
+    return deep_merge_dict(merged, cfg)
 
 
 def deep_merge_dict(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
@@ -39,8 +71,6 @@ def load_merged_yaml(paths: Iterable[str]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for path in paths:
         cfg = load_yaml(path)
-        if not isinstance(cfg, dict):
-            raise ValueError(f"Config must be a YAML object: {path}")
         merged = deep_merge_dict(merged, cfg)
     return merged
 

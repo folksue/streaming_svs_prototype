@@ -1,0 +1,8 @@
+__base__:
+  - ../base/runtime_mixed_mid_27m.yaml
+  - ../data/mixed_official.yaml
+  - ../model/mid_27m.yaml
+
+data:
+  batch_size: 64
+  num_workers: 8

@@ -1,0 +1,4 @@
+__base__:
+  - ../base/runtime_default_100m.yaml
+  - ../data/default_manifest.yaml
+  - ../model/default_100m.yaml

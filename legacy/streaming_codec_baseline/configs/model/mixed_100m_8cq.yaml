@@ -1,0 +1,5 @@
+__base__:
+  - default_100m.yaml
+
+model:
+  phoneme_vocab_size: 2048
