@@ -48,6 +48,7 @@ def main() -> None:
     tokens_per_step = int(train_set.meta["tokens_per_step"])
     codebook_size = int(train_set.meta["codebook_size"])
     cfg["_runtime_max_note_id"] = int(train_set.meta.get("max_note_id", 0))
+    cfg["_runtime_max_singer_id"] = int(train_set.meta.get("max_singer_id", 0))
     model = build_model(cfg, num_codebooks, tokens_per_step, codebook_size).to(dev)
 
     train_sampler = ShardAwareRandomSampler(train_set, seed=int(cfg["seed"])) if getattr(train_set, "storage", "single") == "sharded" else None

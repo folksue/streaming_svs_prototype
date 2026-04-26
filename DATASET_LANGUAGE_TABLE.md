@@ -29,6 +29,18 @@
 | LibriTTS-R | 585 | 英文 |
 | HiFiTTS-2 | 36.7k（22.05k 训练版）/ 31.7k（44.1k 训练版） | 英文 |
 
+## C. 仓库内相关汇总文档索引（已整理）
+
+| 文件 | 主要内容 | 适用场景 |
+|---|---|---|
+| `AR_DISCRETE_TTS_SCALING_TABLE.md` | AR 离散语音/TTS 代表工作对比（模型规模、数据规模、coarse token 估算、是否 text 预训练） | 估算你当前数据量下的合理模型参数档位 |
+| `CODEC_ROUTE_COMPARISON.md` | 多种 codec/tokenizer 路线对比（EnCodec、XY/MOSS、Qwen3-Omni/VITA 方案） | 选 tokenizer/codec 技术路线 |
+| `MODEL_TOKEN_LAYOUT_SUMMARY.md` | 主流语音模型 token 排列方式（交错/instruction/delay）和起止策略总结 | 设计交错 AR 序列协议、BOS/EOS/状态机 |
+| `MULTILINGUAL_TTS_SURVEY_2026.md` | 多语言 TTS 近期模型调研（含本地论文/代码落地状态） | 多语言扩展和前端 tokenization 方案对比 |
+| `legacy/streaming_codec_baseline/M4SINGER_INTERFACE_NOTE.md` | M4Singer 原始标注与可落地转换接口说明 | 写/改 M4Singer adapter 与数据转换 |
+
+备注：如果你希望，我可以把 A/B 两张表再导出一份“仅中文优先训练集”子表（含建议采样权重）。
+
 ## 主要来源
 
 - OpenCpop: https://github.com/wenet-e2e/opencpop

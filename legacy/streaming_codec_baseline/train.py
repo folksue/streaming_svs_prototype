@@ -47,6 +47,13 @@ def resolve_config_paths(args: argparse.Namespace) -> list[str]:
 def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_size: int) -> StreamingSVSModel:
     m = cfg["model"]
     note_vocab_size = max(int(m["note_vocab_size"]), int(cfg["_runtime_max_note_id"]) + 1)
+    runtime_max_singer_id = int(cfg.get("_runtime_max_singer_id", 0))
+    configured_singer_vocab_size = int(m.get("singer_vocab_size", 0))
+    singer_vocab_size = (
+        max(configured_singer_vocab_size, runtime_max_singer_id + 1)
+        if configured_singer_vocab_size > 0 or runtime_max_singer_id > 0
+        else 0
+    )
     return StreamingSVSModel(
         num_codebooks=num_codebooks,
         tokens_per_step=tokens_per_step,
@@ -58,6 +65,8 @@ def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_si
         slur_emb_dim=m["slur_emb_dim"],
         phone_progress_bins=m["phone_progress_bins"],
         phone_progress_emb_dim=m["phone_progress_emb_dim"],
+        singer_vocab_size=singer_vocab_size,
+        singer_emb_dim=int(m.get("singer_emb_dim", 0)),
         cond_dim=m["cond_dim"],
         token_emb_dim=m.get("token_emb_dim", 128),
         prev_step_dim=m.get("prev_step_dim", 256),
@@ -111,6 +120,7 @@ def run_epoch(
         phoneme_id = batch["phoneme_id"].to(dev)
         slur = batch["slur"].to(dev)
         phone_progress = batch["phone_progress"].to(dev)
+        singer_id = batch["singer_id"].to(dev)
         mask = batch["mask"].to(dev)
 
         with torch.cuda.amp.autocast(enabled=use_amp):
@@ -120,6 +130,7 @@ def run_epoch(
                 phoneme_id=phoneme_id,
                 slur=slur,
                 phone_progress=phone_progress,
+                singer_id=singer_id,
                 mask=mask,
             )
             loss = masked_cross_entropy(logits, codes, mask)
@@ -230,6 +241,7 @@ def run_validation(model, loader, dev):
         phoneme_id = batch["phoneme_id"].to(dev)
         slur = batch["slur"].to(dev)
         phone_progress = batch["phone_progress"].to(dev)
+        singer_id = batch["singer_id"].to(dev)
         mask = batch["mask"].to(dev)
         on_b = batch["note_on_boundary"].to(dev)
         off_b = batch["note_off_boundary"].to(dev)
@@ -240,6 +252,7 @@ def run_validation(model, loader, dev):
             phoneme_id=phoneme_id,
             slur=slur,
             phone_progress=phone_progress,
+            singer_id=singer_id,
             mask=mask,
         )
         pred_codes = logits.argmax(dim=-1)
@@ -257,6 +270,7 @@ def run_validation(model, loader, dev):
             phoneme_id=phoneme_id,
             slur=slur,
             phone_progress=phone_progress,
+            singer_id=singer_id,
             temperature=0.0,
         )
         ar_acc = masked_code_accuracy(ar_codes, codes, mask)
@@ -325,6 +339,7 @@ def main() -> None:
     tokens_per_step = int(train_set.meta["tokens_per_step"])
     codebook_size = int(train_set.meta["codebook_size"])
     cfg["_runtime_max_note_id"] = int(train_set.meta.get("max_note_id", 0))
+    cfg["_runtime_max_singer_id"] = int(train_set.meta.get("max_singer_id", 0))
 
     model = build_model(cfg, num_codebooks, tokens_per_step, codebook_size).to(dev)
     num_params = sum(p.numel() for p in model.parameters())

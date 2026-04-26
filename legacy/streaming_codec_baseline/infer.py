@@ -60,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache", type=str, required=True)
     p.add_argument("--index", type=int, default=0)
     p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument(
+        "--singer-id",
+        type=int,
+        default=None,
+        help="Override singer_id used in conditioning for all steps. "
+        "Default uses singer_id from cache sample.",
+    )
     p.add_argument("--decode_wav", action="store_true")
     p.add_argument(
         "--stream_decode",
@@ -88,6 +95,8 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
         slur_emb_dim=cfg["slur_emb_dim"],
         phone_progress_bins=cfg["phone_progress_bins"],
         phone_progress_emb_dim=cfg["phone_progress_emb_dim"],
+        singer_vocab_size=int(cfg.get("singer_vocab_size", 0)),
+        singer_emb_dim=int(cfg.get("singer_emb_dim", 0)),
         cond_dim=cfg["cond_dim"],
         token_emb_dim=cfg.get("token_emb_dim", 128),
         prev_step_dim=cfg.get("prev_step_dim", 256),
@@ -130,6 +139,9 @@ def main() -> None:
     phoneme = sample.phoneme_id.unsqueeze(0).to(dev)
     slur = sample.slur.unsqueeze(0).to(dev)
     phone_progress = sample.phone_progress.unsqueeze(0).to(dev)
+    singer_id = sample.singer_id.unsqueeze(0).to(dev)
+    if args.singer_id is not None:
+        singer_id = torch.full_like(singer_id, fill_value=int(args.singer_id))
     on_b = sample.note_on_boundary.unsqueeze(0).to(dev)
     off_b = sample.note_off_boundary.unsqueeze(0).to(dev)
     mask = torch.ones(1, codes_gt.size(1), device=dev)
@@ -150,6 +162,7 @@ def main() -> None:
                 phoneme_id=phoneme,
                 slur=slur,
                 phone_progress=phone_progress,
+                singer_id=singer_id,
                 temperature=args.temperature,
             )
         ):

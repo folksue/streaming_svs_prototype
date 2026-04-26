@@ -7,6 +7,8 @@ model:
   slur_emb_dim: 8
   phone_progress_bins: 8
   phone_progress_emb_dim: 16
+  singer_vocab_size: 128
+  singer_emb_dim: 16
   cond_dim: 128
   token_emb_dim: 96
   prev_step_dim: 128

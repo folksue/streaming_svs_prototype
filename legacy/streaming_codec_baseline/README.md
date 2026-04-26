@@ -1,26 +1,24 @@
 # Streaming SVS Prototype (EnCodec Discrete Codec Streaming)
 # 流式歌声合成原型（EnCodec 离散码流式建模）
 
-Research prototype for chunk-wise streaming singing synthesis.
-分块流式歌声合成研究原型。
+Research prototype for step-wise streaming singing synthesis with discrete codec tokens.
+基于离散 codec token 的 step 级流式歌声合成研究原型。
 
 ## Design Choices / 设计要点
 - **Acoustic space**: frozen pretrained EnCodec discrete codec ids (preprocessed offline)
 - **声学空间**：使用冻结的预训练 EnCodec 离散码（离线预处理）
-- **Chunking**: default 100 ms
-- **分块方式**：默认 100 ms
-- **Inputs**: phoneme IDs + note/pitch/slur + integer phone-progress bucket features
-- **输入条件**：音素 ID + 音符/音高/slur + 整数化的音素进度桶特征
-- **Streaming context**: previous-chunk token embedding summary
-- **流式上下文**：上一分块 token 嵌入摘要
-- **Generator**: chunk-local residual classifier over frame/codebook slots
-- **生成器**：面向分块内 frame/codebook 槽位的残差分类器
+- **Step layout**: one control token + `S` audio slots per step (`S=tokens_per_step`)
+- **Step 布局**：每步一个控制位 + `S` 个音频槽位（`S=tokens_per_step`）
+- **Inputs**: phoneme IDs + note/pitch/slur + integer phone-progress + singer ID
+- **输入条件**：音素 ID + 音符/音高/slur + 整数化音素进度 + singer ID
+- **Generator**: single-stream decoder-only AR with local attention + RoPE
+- **生成器**：单流 decoder-only 自回归（局部注意力 + RoPE）
 - **Training loss**: masked token-level cross-entropy (with token accuracy metrics)
 - **训练目标**：带 mask 的 token 级交叉熵（并记录 token 准确率）
 
 ## Files / 文件说明
-- `preprocess_encodec.py`: waveform + alignment manifest -> chunk sequence cache (`.pt`)
-- `preprocess_encodec.py`：音频与对齐标注 -> 分块序列缓存（`.pt`）
+- `preprocess_encodec.py`: two-stage preprocess (`encodec-only` / `pack-only` / `full`)
+- `preprocess_encodec.py`：两阶段预处理（仅 EnCodec / 仅打包 / 全流程）
 - `metadata_adapters.py`: real dataset metadata adapters for M4Singer / OpenCpop / KiSing / ACE segments
 - `metadata_adapters.py`：M4Singer / OpenCpop / KiSing / ACE 分段数据元信息适配器
 - `dataset.py`: variable-length sequence dataset + padding/mask collate
@@ -33,8 +31,12 @@ Research prototype for chunk-wise streaming singing synthesis.
 - `logging_utils.py`：控制台 / TensorBoard / W&B 指标日志
 - `infer.py`: autoregressive generation + diagnostics + optional wav decode
 - `infer.py`：自回归生成 + 诊断指标 + 可选 wav 解码
-  - current inference path now supports chunk-wise streaming-style generation and chunk-wise decode
-  - 当前推理路径已支持逐 chunk 生成与逐 chunk 解码
+  - supports `--singer-id` override at inference time
+  - 支持推理时用 `--singer-id` 强制覆盖条件
+- `eval_audio_metrics.py`: objective audio metrics (`f0_rmse_hz`, `f0_cents_rmse`, `vuv_acc`, `logmel_l1`, etc.)
+- `eval_audio_metrics.py`：客观音频指标计算脚本
+- `AR_TTS_SPEAKER_CONDITIONING_TABLE.md`: speaker conditioning survey for AR-TTS/SVS
+- `AR_TTS_SPEAKER_CONDITIONING_TABLE.md`：AR-TTS/SVS speaker 条件方式对比
 - `artifacts/`: generated caches, checkpoints, TensorBoard runs, inference outputs
 - `artifacts/`：缓存、检查点、训练日志与推理输出
 - `config.yaml`: experiment config
@@ -154,6 +156,8 @@ Each utterance record should include:
 - `phoneme_intervals`: `[[start, end], ...]`
 - `note_pitch_midi`
 - `note_intervals`: `[[start, end], ...]`
+- optional `singer` / `speaker` / `spk_id` fields (adapter will normalize to `singer_id`)
+- 可选 `singer` / `speaker` / `spk_id` 字段（适配器会规范化为 `singer_id`）
 - optional `duration`
 - 可选 `duration`
 
@@ -167,8 +171,10 @@ Adapters can also build this schema from real dataset metadata:
 - `ace-opencpop-segments`: ACE-OpenCpop segment JSON (`segment_id/phn/note_*`) from HF export or sample downloader
 - `ace-kising-segments`: ACE-KiSing segment JSON (same parser as ACE-OpenCpop segments)
 
-For real metadata adapters, preprocessing builds/reuses phoneme vocab at `data.phoneme_vocab_path`.
-对于真实数据适配器，预处理会在 `data.phoneme_vocab_path` 生成/复用音素词表。
+For real metadata adapters, preprocessing builds/reuses:
+对于真实数据适配器，预处理会生成/复用：
+- phoneme vocab at `data.phoneme_vocab_path`
+- singer vocab at `data.singer_vocab_path`
 
 If `data.auto_split_valid: true` and valid manifest resolves to zero entries, preprocessing will deterministically carve out validation set from train entries using `utt_id`.
 若配置 `data.auto_split_valid: true` 且 valid 清单为空，预处理会基于 `utt_id` 从训练集确定性切分验证集。
@@ -265,7 +271,7 @@ data:
 
 ## Pipeline / 流程
 1. Build train/valid manifests / 构建训练与验证 manifest
-2. Preprocess to EnCodec discrete-code chunk cache / 预处理为 EnCodec 离散码分块缓存
+2. Preprocess to EnCodec discrete codes + step cache / 预处理为 EnCodec 原始码与 step 缓存
 3. Train / 训练
 4. Inference + diagnostics / 推理与诊断
 
@@ -287,9 +293,20 @@ If checks fail, training exits early with clear error messages.
 
 ## Commands / 常用命令
 ```bash
-python preprocess_encodec.py --config config.yaml --split both
+python preprocess_encodec.py --config config.yaml --split both --mode full
 python train.py --config config.yaml
 python infer.py --checkpoint artifacts/checkpoints/best.pt --cache artifacts/data/valid_chunks.pt --index 0 --decode_wav
+# force a specific singer condition for ablation/debug
+python infer.py --checkpoint artifacts/checkpoints/best.pt --cache artifacts/data/valid_chunks.pt --index 0 --singer-id 3 --decode_wav
+```
+
+Two-stage preprocess examples / 两阶段预处理示例：
+```bash
+# Stage 1: only run EnCodec once (slow)
+python preprocess_encodec.py --config config.yaml --split both --mode encodec-only
+
+# Stage 2: repack controls from raw EnCodec cache (fast, reusable)
+python preprocess_encodec.py --config config.yaml --split both --mode pack-only
 ```
 
 Split model/data config example / 模型配置与数据配置拆分示例：
@@ -298,7 +315,8 @@ python preprocess_encodec.py \
   --config configs/base/runtime_tiny.yaml \
   --data-config configs/data/mix_4ds_template.yaml \
   --model-config configs/model/tiny_4m.yaml \
-  --split both
+  --split both \
+  --mode full
 
 python train.py \
   --config configs/base/runtime_tiny.yaml \

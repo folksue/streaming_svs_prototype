@@ -100,8 +100,11 @@ def normalize_config_paths(cfg: Dict[str, Any], repo_root: Path | None = None) -
         "train_audio_root",
         "valid_audio_root",
         "phoneme_vocab_path",
+        "singer_vocab_path",
         "train_cache",
         "valid_cache",
+        "train_raw_codes_cache",
+        "valid_raw_codes_cache",
     ):
         if key in data_cfg and data_cfg[key] is not None:
             data_cfg[key] = resolve_repo_path(data_cfg[key], root)

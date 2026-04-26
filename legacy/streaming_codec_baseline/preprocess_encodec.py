@@ -16,7 +16,9 @@ import soundfile as sf
 from metadata_adapters import (
     adapter_needs_phoneme_vocab,
     attach_phoneme_ids,
+    attach_singer_ids,
     build_or_load_phoneme_vocab,
+    build_or_load_singer_vocab,
     load_manifest_entries,
 )
 from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_paths, set_seed
@@ -24,6 +26,8 @@ from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_pat
 CACHE_FORMAT = "svs_step_codes"
 CACHE_FORMAT_VERSION = 3
 SHARDED_CACHE_FORMAT_VERSION = 4
+RAW_CACHE_FORMAT = "encodec_codes_only"
+RAW_CACHE_FORMAT_VERSION = 1
 
 
 @dataclass
@@ -36,6 +40,7 @@ class StepItem:
     phone_progress: torch.Tensor  # [T]
     note_on_boundary: torch.Tensor
     note_off_boundary: torch.Tensor
+    singer_id: torch.Tensor
 
 
 class FrozenEncodec:
@@ -236,6 +241,8 @@ def step_sequence(
     phone_progress = []
     note_on_b = []
     note_off_b = []
+    singer_ids = []
+    utterance_singer_id = int(utt.get("singer_id", 0))
 
     for t_idx in range(n_steps):
         start_frame = t_idx * tokens_per_step_override
@@ -262,6 +269,7 @@ def step_sequence(
         phone_progress.append(ph_prog)
         note_on_b.append(float(on_b))
         note_off_b.append(float(off_b))
+        singer_ids.append(utterance_singer_id)
 
     return StepItem(
         utt_id=str(utt["utt_id"]),
@@ -272,6 +280,7 @@ def step_sequence(
         phone_progress=torch.tensor(phone_progress, dtype=torch.long),
         note_on_boundary=torch.tensor(note_on_b, dtype=torch.float32),
         note_off_boundary=torch.tensor(note_off_b, dtype=torch.float32),
+        singer_id=torch.tensor(singer_ids, dtype=torch.long),
     )
 
 
@@ -421,6 +430,7 @@ def build_cache(
                 "phone_progress": it.phone_progress,
                 "note_on_boundary": it.note_on_boundary,
                 "note_off_boundary": it.note_off_boundary,
+                "singer_id": it.singer_id,
             }
             for it in items
         ],
@@ -435,6 +445,7 @@ def build_cache(
             "codebook_size": encodec.codebook_size,
             "phone_progress_bins": int(cfg["model"]["phone_progress_bins"]),
             "max_note_id": max(int(it.note_id.max().item()) for it in items),
+            "max_singer_id": max(int(it.singer_id.max().item()) for it in items),
         },
     }
 
@@ -636,6 +647,18 @@ def prepare_entries(cfg: Dict[str, Any], split_names: List[str]) -> Dict[str, Li
             split_name: attach_phoneme_ids(entries, vocab)
             for split_name, entries in split_entries.items()
         }
+
+    singer_vocab_path = cfg["data"].get("singer_vocab_path", "data/singer_vocab.json")
+    allow_create_singer = "train" in split_names
+    singer_vocab = build_or_load_singer_vocab(
+        singer_vocab_path,
+        list(split_entries.values()),
+        allow_create=allow_create_singer,
+    )
+    split_entries = {
+        split_name: attach_singer_ids(entries, singer_vocab)
+        for split_name, entries in split_entries.items()
+    }
 
     return split_entries
 

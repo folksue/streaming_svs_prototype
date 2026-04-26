@@ -889,3 +889,55 @@ Source: [papers/musicgen.pdf](/mnt/c/streaming_svs_prototype/papers/musicgen.pdf
   - `MusicGen delay` 更像“单头单序列 pattern 设计”。
   - `MOSS-TTS Delay` 更像“多头版 delay”，计算上更激进，直接一拍并行出整组音频 head。
   - 这两者都不是你之前说的“coarse 模型 + fine 模型”两阶段方案。
+
+## 89. SoulX 的数据到底有没有公开“爬取与清洗”代码
+
+### Question
+`SoulX-Singer` 仓库是否公开了数据爬取/清洗代码？如果有，边界在哪里？
+
+### Code / README Evidence
+- 仓库首页明确定位是 **inference code**：
+  - 标题写的是 `Official inference code for SoulX-Singer`，见 [third_party/SoulX-Singer/README.md:4](/mnt/c/streaming_svs_prototype/third_party/SoulX-Singer/README.md#L4)
+- 仓库公开了一个 `preprocess` 子模块，且 README 明确是“转写与编辑工具链”：
+  - `singing transcription and editing toolkit`，见 [third_party/SoulX-Singer/preprocess/README.md:3](/mnt/c/streaming_svs_prototype/third_party/SoulX-Singer/preprocess/README.md#L3)
+  - 自动流程包含：分离/去混响、F0+VAD、歌词转写、音符转写，见 [third_party/SoulX-Singer/preprocess/README.md:79](/mnt/c/streaming_svs_prototype/third_party/SoulX-Singer/preprocess/README.md#L79)
+- `pipeline.py` 的具体实现也对应这个边界：
+  - 调用 `VocalSeparator / F0Extractor / VocalDetector / LyricTranscriber / NoteTranscriber`，见 [third_party/SoulX-Singer/preprocess/pipeline.py:10](/mnt/c/streaming_svs_prototype/third_party/SoulX-Singer/preprocess/pipeline.py#L10)
+  - 输出 `metadata.json` 并可转 MIDI 做人工修订，见 [third_party/SoulX-Singer/preprocess/pipeline.py:117](/mnt/c/streaming_svs_prototype/third_party/SoulX-Singer/preprocess/pipeline.py#L117)
+- 仓库中未看到“网页抓取/版权过滤/大规模去重”的采集流水线脚本；更多是给定音频后的标注生成与编辑。
+
+### Conclusion
+- Confirmed:
+  - SoulX 开源了“预处理与标注工具链”代码（可把输入音频转成可用于 SVS 的 metadata）。
+  - 这套代码主要覆盖：音频预处理、歌词/音符转写、MIDI 编辑回写。
+  - 没有在仓库中公开 42k 小时训练集对应的完整“数据爬取+全量清洗”生产流水线。
+- Inference:
+  - 你可以直接复用它的 `preprocess` 作为“给定音频后的自动标注器”，但“数据源采集与合规清洗”需要你自己补。
+- Open uncertainty:
+  - 官方是否在内网有完整数据工程系统不可见；公开仓库层面无法验证。
+
+## 90. SoulX 原始论文对“数据构建”是怎么写的
+
+### Question
+SoulX 原始论文是否说明了数据怎么爬/怎么构建？具体写到了哪一步？
+
+### Paper Evidence
+Source: `third_party/SoulX-Singer/assets/technical-report.pdf`
+- [third_party/SoulX-Singer/assets/technical-report.pdf#page=3](third_party/SoulX-Singer/assets/technical-report.pdf#page=3)
+  - Section 2.1 写的是数据处理工作流：`vocal separation -> lyric transcription -> note transcription`，并提到抽取 F0。
+  - Figure 2 标题明确是 `Pipeline for large-scale singing data curation: from raw audio extraction to time-aligned MIDI and text formulation.`
+- [third_party/SoulX-Singer/assets/technical-report.pdf#page=4](third_party/SoulX-Singer/assets/technical-report.pdf#page=4)
+  - `Using the aforementioned processing methods, we obtained approximately 42,000 hours ...`
+  - 给了语种规模分布（中/英各约 20k 小时，粤语约 2k 小时）。
+- [third_party/SoulX-Singer/assets/technical-report.pdf#page=6](third_party/SoulX-Singer/assets/technical-report.pdf#page=6)
+  - 对评测集来源写得更具体：Mandarin 来自征集并同意开源的 singers；English 从 Mixing Secrets 切分过滤。
+
+### Conclusion
+- Confirmed:
+  - 论文公开说明了“处理与标注流水线”细节（分离、转写、对齐、F0）。
+  - 论文给了训练数据总量与语种分布（42k+ 小时）。
+  - 论文对评测集数据来源有较明确描述。
+- Inference:
+  - 论文没有展开公开“全量训练数据来源采集/网页爬取/版权清洗”的工程细节与脚本；公开信息更偏向数据后处理与标注构建方法。
+- Open uncertainty:
+  - 42k 训练语料的具体来源分布、授权策略、去重/过滤规则在论文中未细化到可复现实操级别。

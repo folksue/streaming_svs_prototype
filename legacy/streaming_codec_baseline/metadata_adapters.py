@@ -96,6 +96,43 @@ def build_or_load_phoneme_vocab(
     return vocab
 
 
+def build_or_load_singer_vocab(
+    vocab_path: str,
+    all_entries: Sequence[Sequence[Dict[str, Any]]],
+    allow_create: bool,
+) -> Dict[str, int]:
+    if os.path.exists(vocab_path):
+        raw_vocab = load_json(vocab_path)
+        if not isinstance(raw_vocab, dict):
+            raise ValueError(f"Singer vocab must be a JSON object: {vocab_path}")
+        vocab = {str(k): int(v) for k, v in raw_vocab.items()}
+        if "<unk>" not in vocab:
+            vocab["<unk>"] = 0
+        return vocab
+
+    if not allow_create:
+        raise FileNotFoundError(
+            f"Singer vocab not found: {vocab_path}. "
+            "Run preprocessing with the training split first or provide a prebuilt vocab."
+        )
+
+    labels = sorted(
+        {
+            str(entry.get("singer", "")).strip()
+            for entries in all_entries
+            for entry in entries
+            if str(entry.get("singer", "")).strip()
+        }
+    )
+    vocab = {"<unk>": 0}
+    for idx, label in enumerate(labels, start=1):
+        vocab[label] = idx
+
+    ensure_dir(os.path.dirname(vocab_path) or ".")
+    save_json(vocab_path, vocab)
+    return vocab
+
+
 def attach_phoneme_ids(entries: Sequence[Dict[str, Any]], phoneme_vocab: Dict[str, int]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for entry in entries:
@@ -121,6 +158,21 @@ def attach_phoneme_ids(entries: Sequence[Dict[str, Any]], phoneme_vocab: Dict[st
     return normalized
 
 
+def attach_singer_ids(entries: Sequence[Dict[str, Any]], singer_vocab: Dict[str, int]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    unk_id = int(singer_vocab.get("<unk>", 0))
+    for entry in entries:
+        if "singer_id" in entry:
+            normalized.append(entry)
+            continue
+
+        label = str(entry.get("singer", "")).strip()
+        item = dict(entry)
+        item["singer_id"] = int(singer_vocab.get(label, unk_id))
+        normalized.append(item)
+    return normalized
+
+
 def normalize_standard_entry(entry: Dict[str, Any], base_dir: str) -> Dict[str, Any]:
     normalized = dict(entry)
     normalized["utt_id"] = str(entry["utt_id"])
@@ -140,6 +192,11 @@ def normalize_standard_entry(entry: Dict[str, Any], base_dir: str) -> Dict[str, 
         normalized["phoneme_symbols"] = parse_symbol_sequence(entry["phoneme_symbols"])
     if "duration" in entry:
         normalized["duration"] = float(entry["duration"])
+    if "singer_id" in entry:
+        normalized["singer_id"] = int(entry["singer_id"])
+    else:
+        singer_raw = first_present(entry, "singer", "speaker", "spk", "spk_id")
+        normalized["singer"] = normalize_singer_label(singer_raw, fallback=f"spk::{normalized['utt_id']}")
     return normalized
 
 
@@ -199,6 +256,7 @@ def load_m4singer_entries(manifest_path: str, audio_root: str | None = None) -> 
                 )
 
         duration = max_duration(phoneme_intervals, note_intervals, raw.get("duration"))
+        singer_label = str(item_name).split("#", 1)[0] if "#" in str(item_name) else None
         entries.append(
             {
                 "utt_id": str(item_name),
@@ -209,6 +267,7 @@ def load_m4singer_entries(manifest_path: str, audio_root: str | None = None) -> 
                 "note_intervals": note_intervals,
                 "note_slur": note_slur,
                 "duration": duration,
+                "singer": normalize_singer_label(singer_label, fallback=f"m4::{item_name}"),
             }
         )
     return entries
@@ -257,6 +316,7 @@ def load_opencpop_entries(manifest_path: str, audio_root: str | None = None) -> 
                 fallback_relative=f"{utt_id}.wav",
             )
 
+            singer_label = infer_singer_from_utt_id(utt_id, default_label="opencpop_default")
             entries.append(
                 {
                     "utt_id": utt_id,
@@ -267,6 +327,7 @@ def load_opencpop_entries(manifest_path: str, audio_root: str | None = None) -> 
                     "note_intervals": note_intervals,
                     "note_slur": slur_flags,
                     "duration": max_duration(phoneme_intervals, note_intervals, None),
+                    "singer": singer_label,
                 }
             )
     return entries
@@ -316,6 +377,7 @@ def load_soulx_singer_eval_entries(manifest_path: str, audio_root: str | None = 
             fallback_relative=guess_soulx_audio_path(raw, utt_id),
         )
 
+        singer_label = first_present(raw, "singer", "speaker", "spk", "spk_id")
         entries.append(
             {
                 "utt_id": utt_id,
@@ -326,6 +388,7 @@ def load_soulx_singer_eval_entries(manifest_path: str, audio_root: str | None = 
                 "note_intervals": note_intervals,
                 "note_slur": [0 for _ in note_intervals],
                 "duration": max_duration(phoneme_intervals, note_intervals, raw.get("duration")),
+                "singer": normalize_singer_label(singer_label, fallback=f"soulx::{utt_id}"),
             }
         )
     return entries
@@ -336,7 +399,11 @@ def load_kising_entries(manifest_path: str, audio_root: str | None = None) -> Li
     KiSing adapter.
     Current implementation follows the OpenCpop text metadata schema.
     """
-    return load_opencpop_entries(manifest_path, audio_root=audio_root)
+    entries = load_opencpop_entries(manifest_path, audio_root=audio_root)
+    for item in entries:
+        if item.get("singer") == "opencpop_default":
+            item["singer"] = infer_singer_from_utt_id(item.get("utt_id", ""), default_label="kising_default")
+    return entries
 
 
 def load_ace_opencpop_segments_entries(manifest_path: str, audio_root: str | None = None) -> List[Dict[str, Any]]:
@@ -425,6 +492,7 @@ def load_ace_opencpop_segments_entries(manifest_path: str, audio_root: str | Non
             fallback_relative=f"{utt_id}.wav",
         )
 
+        singer_label = first_present(raw, "singer", "speaker", "spk", "spk_id", "person", "voice")
         entries.append(
             {
                 "utt_id": utt_id,
@@ -435,6 +503,7 @@ def load_ace_opencpop_segments_entries(manifest_path: str, audio_root: str | Non
                 "note_intervals": note_intervals,
                 "note_slur": note_slur,
                 "duration": max_duration(phoneme_intervals, note_intervals, raw.get("duration")),
+                "singer": normalize_singer_label(singer_label, fallback=f"ace::{utt_id}"),
             }
         )
     return entries
@@ -581,6 +650,26 @@ def first_present(entry: Dict[str, Any], *keys: str) -> Any:
         if key in entry and entry[key] is not None:
             return entry[key]
     return None
+
+
+def normalize_singer_label(value: Any, fallback: str) -> str:
+    if value is None:
+        return str(fallback)
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "nan"}:
+        return str(fallback)
+    return text
+
+
+def infer_singer_from_utt_id(utt_id: str, default_label: str) -> str:
+    text = str(utt_id).strip()
+    if "#" in text:
+        return text.split("#", 1)[0].strip() or default_label
+    if "_" in text:
+        prefix = text.split("_", 1)[0].strip()
+        if prefix and prefix.lower() not in {"seg", "utt", "sample"}:
+            return prefix
+    return default_label
 
 
 def note_to_midi(note: str) -> float:

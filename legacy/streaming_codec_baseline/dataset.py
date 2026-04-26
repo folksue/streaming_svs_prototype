@@ -23,6 +23,7 @@ class SequenceItem:
     phone_progress: torch.Tensor
     note_on_boundary: torch.Tensor
     note_off_boundary: torch.Tensor
+    singer_id: torch.Tensor
 
 
 def is_sharded_cache_path(cache_path: str) -> bool:
@@ -104,6 +105,7 @@ class SVSSequenceDataset(Dataset):
         phone_progress = it["phone_progress"].long()
         on_b = it["note_on_boundary"].float()
         off_b = it["note_off_boundary"].float()
+        singer = it["singer_id"].long() if "singer_id" in it else torch.zeros_like(note_id, dtype=torch.long)
 
         if self.max_seq_len is not None and codes.size(0) > self.max_seq_len:
             codes = codes[: self.max_seq_len]
@@ -113,6 +115,7 @@ class SVSSequenceDataset(Dataset):
             phone_progress = phone_progress[: self.max_seq_len]
             on_b = on_b[: self.max_seq_len]
             off_b = off_b[: self.max_seq_len]
+            singer = singer[: self.max_seq_len]
 
         return SequenceItem(
             utt_id=it["utt_id"],
@@ -123,6 +126,7 @@ class SVSSequenceDataset(Dataset):
             phone_progress=phone_progress,
             note_on_boundary=on_b,
             note_off_boundary=off_b,
+            singer_id=singer,
         )
 
 
@@ -139,6 +143,7 @@ def collate_sequences(batch: List[SequenceItem]) -> Dict[str, torch.Tensor | Lis
     phone_progress = torch.zeros(bsz, t_max, dtype=torch.long)
     note_on_boundary = torch.zeros(bsz, t_max)
     note_off_boundary = torch.zeros(bsz, t_max)
+    singer_id = torch.zeros(bsz, t_max, dtype=torch.long)
     mask = torch.zeros(bsz, t_max)
 
     utt_ids: List[str] = []
@@ -151,6 +156,7 @@ def collate_sequences(batch: List[SequenceItem]) -> Dict[str, torch.Tensor | Lis
         phone_progress[i, :t] = it.phone_progress
         note_on_boundary[i, :t] = it.note_on_boundary
         note_off_boundary[i, :t] = it.note_off_boundary
+        singer_id[i, :t] = it.singer_id
         mask[i, :t] = 1.0
         utt_ids.append(it.utt_id)
 
@@ -163,6 +169,7 @@ def collate_sequences(batch: List[SequenceItem]) -> Dict[str, torch.Tensor | Lis
         "phone_progress": phone_progress,
         "note_on_boundary": note_on_boundary,
         "note_off_boundary": note_off_boundary,
+        "singer_id": singer_id,
         "mask": mask,
     }
 
@@ -266,6 +273,7 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
             "note_off_boundary",
         ):
             _require_key(item, key, f"items[{idx}]", cache_path)
+        has_singer_id = "singer_id" in item
 
         _validate_item_tensor(item, "codes", expected_dim=3, cache_path=cache_path)
         _validate_item_tensor(item, "note_id", expected_dim=1, cache_path=cache_path)
@@ -274,6 +282,8 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         _validate_item_tensor(item, "phone_progress", expected_dim=1, cache_path=cache_path)
         _validate_item_tensor(item, "note_on_boundary", expected_dim=1, cache_path=cache_path)
         _validate_item_tensor(item, "note_off_boundary", expected_dim=1, cache_path=cache_path)
+        if has_singer_id:
+            _validate_item_tensor(item, "singer_id", expected_dim=1, cache_path=cache_path)
 
         codes = item["codes"]
         note_id = item["note_id"]
@@ -282,6 +292,7 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
         phone_progress = item["phone_progress"]
         note_on_boundary = item["note_on_boundary"]
         note_off_boundary = item["note_off_boundary"]
+        singer_id = item["singer_id"] if has_singer_id else None
 
         t = codes.size(0)
         if t <= 0:
@@ -297,6 +308,7 @@ def validate_cache_payload(payload: Dict, cache_path: str) -> None:
             or phone_progress.size(0) != t
             or note_on_boundary.size(0) != t
             or note_off_boundary.size(0) != t
+            or (singer_id is not None and singer_id.size(0) != t)
         ):
             raise ValueError(
                 f"Invalid cache '{cache_path}': items[{idx}] time length mismatch across tensors."

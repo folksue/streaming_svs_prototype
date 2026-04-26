@@ -102,6 +102,8 @@ class ConditionEncoder(nn.Module):
         slur_emb_dim: int = 16,
         phone_progress_bins: int = 8,
         phone_progress_emb_dim: int = 32,
+        singer_vocab_size: int = 0,
+        singer_emb_dim: int = 0,
         cond_dim: int = 256,
     ):
         super().__init__()
@@ -109,7 +111,13 @@ class ConditionEncoder(nn.Module):
         self.phoneme_emb = nn.Embedding(phoneme_vocab_size, phoneme_emb_dim)
         self.slur_emb = nn.Embedding(2, slur_emb_dim)
         self.phone_progress_emb = nn.Embedding(phone_progress_bins, phone_progress_emb_dim)
+        self.use_singer = int(singer_vocab_size) > 0 and int(singer_emb_dim) > 0
+        self.singer_emb = (
+            nn.Embedding(int(singer_vocab_size), int(singer_emb_dim)) if self.use_singer else None
+        )
         in_dim = note_emb_dim + phoneme_emb_dim + slur_emb_dim + phone_progress_emb_dim
+        if self.use_singer:
+            in_dim += int(singer_emb_dim)
         self.out = nn.Sequential(
             nn.Linear(in_dim, cond_dim),
             nn.SiLU(),
@@ -122,12 +130,18 @@ class ConditionEncoder(nn.Module):
         phoneme_id: torch.Tensor,
         slur: torch.Tensor,
         phone_progress: torch.Tensor,
+        singer_id: torch.Tensor | None = None,
     ) -> torch.Tensor:
         n = self.note_emb(note_id)
         p = self.phoneme_emb(phoneme_id)
         s = self.slur_emb(slur.clamp(min=0, max=1))
         pg = self.phone_progress_emb(phone_progress)
-        x = torch.cat([n, p, s, pg], dim=-1)
+        parts = [n, p, s, pg]
+        if self.use_singer:
+            if singer_id is None:
+                singer_id = torch.zeros_like(note_id, dtype=torch.long, device=note_id.device)
+            parts.append(self.singer_emb(singer_id))
+        x = torch.cat(parts, dim=-1)
         return self.out(x)
 
 
@@ -297,6 +311,8 @@ class StreamingSVSModel(nn.Module):
         phone_progress_bins: int,
         phone_progress_emb_dim: int,
         cond_dim: int,
+        singer_vocab_size: int,
+        singer_emb_dim: int,
         token_emb_dim: int,
         prev_step_dim: int,  # kept for config compatibility, unused by single-stream architecture
         model_dim: int,
@@ -337,6 +353,8 @@ class StreamingSVSModel(nn.Module):
             slur_emb_dim=slur_emb_dim,
             phone_progress_bins=phone_progress_bins,
             phone_progress_emb_dim=phone_progress_emb_dim,
+            singer_vocab_size=singer_vocab_size,
+            singer_emb_dim=singer_emb_dim,
             cond_dim=cond_dim,
         )
         self.codebook_token_emb = nn.ModuleList(
@@ -567,9 +585,10 @@ class StreamingSVSModel(nn.Module):
         phoneme_id: torch.Tensor,  # [B, T]
         slur: torch.Tensor,  # [B, T]
         phone_progress: torch.Tensor,  # [B, T]
+        singer_id: torch.Tensor | None = None,  # [B, T]
         mask: torch.Tensor | None = None,  # [B, T]
     ) -> torch.Tensor:
-        cond = self.cond_enc(note_id, phoneme_id, slur, phone_progress)
+        cond = self.cond_enc(note_id, phoneme_id, slur, phone_progress, singer_id=singer_id)
         seq_in, valid_pos, position_ids = self._prepare_sequence_inputs(
             cond=cond,
             codes=codes,
@@ -586,6 +605,7 @@ class StreamingSVSModel(nn.Module):
         phoneme_id: torch.Tensor,  # [B, T]
         slur: torch.Tensor,  # [B, T]
         phone_progress: torch.Tensor,  # [B, T]
+        singer_id: torch.Tensor | None = None,  # [B, T]
         temperature: float = 1.0,
     ) -> torch.Tensor:
         out_steps = list(
@@ -594,6 +614,7 @@ class StreamingSVSModel(nn.Module):
                 phoneme_id=phoneme_id,
                 slur=slur,
                 phone_progress=phone_progress,
+                singer_id=singer_id,
                 temperature=temperature,
             )
         )
@@ -606,10 +627,11 @@ class StreamingSVSModel(nn.Module):
         phoneme_id: torch.Tensor,  # [B, T]
         slur: torch.Tensor,  # [B, T]
         phone_progress: torch.Tensor,  # [B, T]
+        singer_id: torch.Tensor | None = None,  # [B, T]
         temperature: float = 1.0,
     ):
         b, t = note_id.shape
-        cond = self.cond_enc(note_id, phoneme_id, slur, phone_progress)
+        cond = self.cond_enc(note_id, phoneme_id, slur, phone_progress, singer_id=singer_id)
         kv_cache: list[tuple[torch.Tensor | None, torch.Tensor | None]] = [
             (None, None) for _ in range(len(self.blocks))
         ]

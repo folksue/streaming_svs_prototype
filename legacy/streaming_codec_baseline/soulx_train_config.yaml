@@ -19,8 +19,11 @@ data:
   valid_ratio: 0.05
   min_valid_items: 16
   phoneme_vocab_path: artifacts/data/soulx_phoneme_vocab.json
+  singer_vocab_path: artifacts/data/soulx_singer_vocab.json
   train_cache: artifacts/data/soulx_train_codes.pt
   valid_cache: artifacts/data/soulx_valid_codes.pt
+  train_raw_codes_cache: artifacts/data/soulx_train_encodec_raw.pt
+  valid_raw_codes_cache: artifacts/data/soulx_valid_encodec_raw.pt
   batch_size: 4
   num_workers: 2
   max_seq_len: 256
@@ -33,6 +36,8 @@ model:
   slur_emb_dim: 16
   phone_progress_bins: 8
   phone_progress_emb_dim: 32
+  singer_vocab_size: 512
+  singer_emb_dim: 32
   cond_dim: 256
   token_emb_dim: 128
   prev_step_dim: 256

@@ -44,8 +44,11 @@ data:
   valid_ratio: 0.05
   min_valid_items: 1
   phoneme_vocab_path: artifacts/data/mix_4ds_phoneme_vocab.json
+  singer_vocab_path: artifacts/data/mix_4ds_singer_vocab.json
   train_cache: artifacts/data/mix_4ds_train_steps.pt
   valid_cache: artifacts/data/mix_4ds_valid_steps.pt
+  train_raw_codes_cache: artifacts/data/mix_4ds_train_encodec_raw.pt
+  valid_raw_codes_cache: artifacts/data/mix_4ds_valid_encodec_raw.pt
   batch_size: 8
   num_workers: 2
   max_seq_len: 256
