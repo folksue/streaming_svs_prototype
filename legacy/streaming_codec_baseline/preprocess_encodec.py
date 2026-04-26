@@ -21,7 +21,7 @@ from metadata_adapters import (
     build_or_load_singer_vocab,
     load_manifest_entries,
 )
-from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_paths, set_seed
+from utils import ensure_dir, get_device, load_merged_yaml, normalize_config_paths, save_json, set_seed
 
 CACHE_FORMAT = "svs_step_codes"
 CACHE_FORMAT_VERSION = 3
@@ -41,6 +41,12 @@ class StepItem:
     note_on_boundary: torch.Tensor
     note_off_boundary: torch.Tensor
     singer_id: torch.Tensor
+
+
+@dataclass
+class RawCodeItem:
+    utt_id: str
+    codes: torch.Tensor  # [T_raw, K]
 
 
 class FrozenEncodec:
@@ -338,13 +344,101 @@ def load_audio(path: str, target_sr: int) -> torch.Tensor:
     return wav
 
 
-def build_cache(
+def get_split_raw_cache_path(cfg: Dict[str, Any], split_name: str) -> str | None:
+    data_cfg = cfg["data"]
+    raw_key = f"{split_name}_raw_codes_cache"
+    raw_path = data_cfg.get(raw_key)
+    if raw_path is None:
+        return None
+    raw_path_str = str(raw_path).strip()
+    return raw_path_str or None
+
+
+def save_raw_cache(
+    *,
+    items: List[RawCodeItem],
+    out_path: str,
+    cfg: Dict[str, Any],
+    codebook_size: int,
+) -> None:
+    payload = {
+        "items": [{"utt_id": it.utt_id, "codes": it.codes} for it in items],
+        "meta": {
+            "cache_format": RAW_CACHE_FORMAT,
+            "cache_format_version": RAW_CACHE_FORMAT_VERSION,
+            "encodec_model": cfg["audio"]["encodec_model_name"],
+            "encodec_bandwidth": cfg["audio"].get("encodec_bandwidth"),
+            "sample_rate": int(cfg["audio"]["sample_rate"]),
+            "codebook_size": int(codebook_size),
+            "num_codebooks": int(items[0].codes.size(-1)) if items else 0,
+        },
+    }
+    ensure_dir(os.path.dirname(out_path) or ".")
+    torch.save(payload, out_path)
+
+
+def load_raw_cache(raw_path: str) -> Dict[str, Any]:
+    payload = torch.load(raw_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid raw cache '{raw_path}': payload must be a dict.")
+    items = payload.get("items")
+    meta = payload.get("meta")
+    if not isinstance(items, list) or not isinstance(meta, dict):
+        raise ValueError(f"Invalid raw cache '{raw_path}': missing items/meta.")
+    if str(meta.get("cache_format")) != RAW_CACHE_FORMAT:
+        raise ValueError(
+            f"Unsupported raw cache format in '{raw_path}': "
+            f"expected '{RAW_CACHE_FORMAT}', got '{meta.get('cache_format')}'."
+        )
+    if int(meta.get("cache_format_version", -1)) != RAW_CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported raw cache format version in '{raw_path}': "
+            f"expected {RAW_CACHE_FORMAT_VERSION}, got {meta.get('cache_format_version')}."
+        )
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"Invalid raw cache '{raw_path}': items[{idx}] must be a dict.")
+        if "utt_id" not in item or "codes" not in item:
+            raise ValueError(f"Invalid raw cache '{raw_path}': items[{idx}] missing utt_id/codes.")
+        if not isinstance(item["codes"], torch.Tensor) or item["codes"].dim() != 2:
+            raise ValueError(f"Invalid raw cache '{raw_path}': items[{idx}]['codes'] must be [T,K] tensor.")
+    return payload
+
+
+def validate_raw_cache_meta(raw_payload: Dict[str, Any], cfg: Dict[str, Any], raw_path: str) -> None:
+    meta = raw_payload["meta"]
+    expected_model = str(cfg["audio"]["encodec_model_name"])
+    expected_bandwidth = cfg["audio"].get("encodec_bandwidth")
+    expected_sample_rate = int(cfg["audio"]["sample_rate"])
+    expected_num_codebooks = cfg["audio"].get("expected_num_codebooks")
+
+    if str(meta.get("encodec_model")) != expected_model:
+        raise ValueError(
+            f"Raw cache '{raw_path}' encodec_model mismatch: "
+            f"expected {expected_model}, got {meta.get('encodec_model')}"
+        )
+    if meta.get("encodec_bandwidth") != expected_bandwidth:
+        raise ValueError(
+            f"Raw cache '{raw_path}' encodec_bandwidth mismatch: "
+            f"expected {expected_bandwidth}, got {meta.get('encodec_bandwidth')}"
+        )
+    if int(meta.get("sample_rate", -1)) != expected_sample_rate:
+        raise ValueError(
+            f"Raw cache '{raw_path}' sample_rate mismatch: "
+            f"expected {expected_sample_rate}, got {meta.get('sample_rate')}"
+        )
+    if expected_num_codebooks is not None and int(meta.get("num_codebooks", -1)) != int(expected_num_codebooks):
+        raise ValueError(
+            f"Raw cache '{raw_path}' num_codebooks mismatch: "
+            f"expected {expected_num_codebooks}, got {meta.get('num_codebooks')}"
+        )
+
+
+def build_raw_cache(
     cfg: Dict[str, Any],
     entries: List[Dict[str, Any]],
-    out_path: str,
     split_name: str,
-    tokens_per_step_override: Optional[int] = None,
-) -> Dict[str, int]:
+) -> tuple[List[RawCodeItem], Dict[str, int]]:
     dev = get_device()
     encodec = FrozenEncodec(
         cfg["audio"]["encodec_model_name"],
@@ -353,17 +447,13 @@ def build_cache(
     )
     expected_num_codebooks = cfg["audio"].get("expected_num_codebooks")
     expected_num_codebooks = None if expected_num_codebooks is None else int(expected_num_codebooks)
-
-    items: List[StepItem] = []
-    resolved_tokens_per_step: Optional[int] = tokens_per_step_override
     preprocess_batch_size = max(1, int(cfg["audio"].get("preprocess_batch_size", 1)))
     skipped_empty_audio = 0
-    skipped_step_sequence = 0
+    raw_items: List[RawCodeItem] = []
     pending_utts: List[Dict[str, Any]] = []
     pending_wavs: List[torch.Tensor] = []
 
     def flush_pending() -> None:
-        nonlocal resolved_tokens_per_step, skipped_step_sequence
         if not pending_wavs:
             return
         code_batches = (
@@ -378,23 +468,11 @@ def build_cache(
                     f"but got {int(code_frames.size(-1))}. "
                     f"Check audio.encodec_bandwidth / model."
                 )
-            item = step_sequence(
-                utt=batch_utt,
-                code_frames=code_frames,
-                tokens_per_step=cfg["audio"]["tokens_per_step"],
-                phone_progress_bins=cfg["model"]["phone_progress_bins"],
-                tokens_per_step_override=resolved_tokens_per_step,
-            )
-            if item is None:
-                skipped_step_sequence += 1
-                continue
-            if resolved_tokens_per_step is None:
-                resolved_tokens_per_step = int(item.codes.size(1))
-            items.append(item)
+            raw_items.append(RawCodeItem(utt_id=str(batch_utt["utt_id"]), codes=code_frames.long().cpu()))
         pending_utts.clear()
         pending_wavs.clear()
 
-    for utt in tqdm(entries, desc=f"preprocess {split_name}"):
+    for utt in tqdm(entries, desc=f"encodec {split_name}"):
         try:
             wav = load_audio(utt["audio_path"], cfg["audio"]["sample_rate"])
         except RuntimeError as exc:
@@ -412,9 +490,53 @@ def build_cache(
             flush_pending()
 
     flush_pending()
+    if not raw_items:
+        raise RuntimeError(f"No usable raw EnCodec items parsed for split={split_name}")
+
+    print(
+        f"Built raw cache items: split={split_name} items={len(raw_items)} "
+        f"codebooks={int(raw_items[0].codes.size(-1))} skipped_empty_audio={skipped_empty_audio}"
+    )
+    return raw_items, {
+        "codebook_size": int(encodec.codebook_size),
+        "num_codebooks": int(raw_items[0].codes.size(-1)),
+    }
+
+
+def build_step_cache_from_raw(
+    cfg: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    raw_items: List[RawCodeItem],
+    out_path: str,
+    split_name: str,
+    codebook_size: int,
+    tokens_per_step_override: Optional[int] = None,
+) -> Dict[str, int]:
+    entry_by_utt_id = {str(entry["utt_id"]): entry for entry in entries}
+    items: List[StepItem] = []
+    resolved_tokens_per_step: Optional[int] = tokens_per_step_override
+    skipped_step_sequence = 0
+
+    for raw_item in tqdm(raw_items, desc=f"step-cache {split_name}"):
+        utt = entry_by_utt_id.get(raw_item.utt_id)
+        if utt is None:
+            raise KeyError(f"Raw cache utt_id '{raw_item.utt_id}' not found in split metadata for {split_name}.")
+        item = step_sequence(
+            utt=utt,
+            code_frames=raw_item.codes,
+            tokens_per_step=cfg["audio"]["tokens_per_step"],
+            phone_progress_bins=cfg["model"]["phone_progress_bins"],
+            tokens_per_step_override=resolved_tokens_per_step,
+        )
+        if item is None:
+            skipped_step_sequence += 1
+            continue
+        if resolved_tokens_per_step is None:
+            resolved_tokens_per_step = int(item.codes.size(1))
+        items.append(item)
 
     if not items:
-        raise RuntimeError(f"No usable items parsed for split={split_name}")
+        raise RuntimeError(f"No usable step-cache items parsed for split={split_name}")
 
     num_codebooks = int(items[0].codes.size(-1))
     tokens_per_step = int(items[0].codes.size(1))
@@ -442,7 +564,7 @@ def build_cache(
             "encodec_model": cfg["audio"]["encodec_model_name"],
             "encodec_bandwidth": cfg["audio"].get("encodec_bandwidth"),
             "sample_rate": cfg["audio"]["sample_rate"],
-            "codebook_size": encodec.codebook_size,
+            "codebook_size": int(codebook_size),
             "phone_progress_bins": int(cfg["model"]["phone_progress_bins"]),
             "max_note_id": max(int(it.note_id.max().item()) for it in items),
             "max_singer_id": max(int(it.singer_id.max().item()) for it in items),
@@ -457,12 +579,63 @@ def build_cache(
         torch.save(payload, out_path)
     print(
         f"Saved cache: {out_path} | items={len(items)} | codebooks={num_codebooks} | S={tokens_per_step} "
-        f"| skipped_empty_audio={skipped_empty_audio} | skipped_step_sequence={skipped_step_sequence}"
+        f"| skipped_step_sequence={skipped_step_sequence}"
     )
     return {
         "num_codebooks": num_codebooks,
         "tokens_per_step": tokens_per_step,
     }
+
+
+def build_cache(
+    cfg: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    out_path: str,
+    split_name: str,
+    tokens_per_step_override: Optional[int] = None,
+) -> Dict[str, int]:
+    raw_cache_path = get_split_raw_cache_path(cfg, split_name)
+    raw_payload: Dict[str, Any] | None = None
+    if raw_cache_path and os.path.exists(raw_cache_path):
+        raw_payload = load_raw_cache(raw_cache_path)
+        validate_raw_cache_meta(raw_payload, cfg, raw_cache_path)
+        print(f"Reusing raw cache: {raw_cache_path} | items={len(raw_payload['items'])}")
+    else:
+        raw_items, raw_meta = build_raw_cache(cfg, entries, split_name)
+        if raw_cache_path:
+            save_raw_cache(
+                items=raw_items,
+                out_path=raw_cache_path,
+                cfg=cfg,
+                codebook_size=int(raw_meta["codebook_size"]),
+            )
+            print(f"Saved raw cache: {raw_cache_path} | items={len(raw_items)}")
+        raw_payload = {
+            "items": [{"utt_id": it.utt_id, "codes": it.codes} for it in raw_items],
+            "meta": {
+                "cache_format": RAW_CACHE_FORMAT,
+                "cache_format_version": RAW_CACHE_FORMAT_VERSION,
+                "encodec_model": cfg["audio"]["encodec_model_name"],
+                "encodec_bandwidth": cfg["audio"].get("encodec_bandwidth"),
+                "sample_rate": int(cfg["audio"]["sample_rate"]),
+                "codebook_size": int(raw_meta["codebook_size"]),
+                "num_codebooks": int(raw_meta["num_codebooks"]),
+            },
+        }
+
+    raw_items_for_step = [
+        RawCodeItem(utt_id=str(item["utt_id"]), codes=item["codes"].long().cpu())
+        for item in raw_payload["items"]
+    ]
+    return build_step_cache_from_raw(
+        cfg=cfg,
+        entries=entries,
+        raw_items=raw_items_for_step,
+        out_path=out_path,
+        split_name=split_name,
+        codebook_size=int(raw_payload["meta"]["codebook_size"]),
+        tokens_per_step_override=tokens_per_step_override,
+    )
 
 
 def save_sharded_cache(payload: Dict[str, Any], out_path: str, items_per_shard: int) -> None:
@@ -663,6 +836,17 @@ def prepare_entries(cfg: Dict[str, Any], split_names: List[str]) -> Dict[str, Li
     return split_entries
 
 
+def save_split_manifests(cfg: Dict[str, Any], split_entries: Dict[str, List[Dict[str, Any]]]) -> None:
+    data_cfg = cfg["data"]
+    for split_name, entries in split_entries.items():
+        manifest_path = data_cfg.get(f"{split_name}_manifest")
+        if not manifest_path:
+            continue
+        ensure_dir(os.path.dirname(str(manifest_path)) or ".")
+        save_json(str(manifest_path), entries)
+        print(f"Saved merged manifest: {manifest_path} | entries={len(entries)}")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", action="append", default=None, help="Can be passed multiple times; later files override earlier ones.")
@@ -697,6 +881,7 @@ def main() -> None:
         split_names.append("valid")
 
     split_entries = prepare_entries(cfg, split_names)
+    save_split_manifests(cfg, split_entries)
 
     train_meta: Optional[Dict[str, int]] = None
     if args.split in ("train", "both"):

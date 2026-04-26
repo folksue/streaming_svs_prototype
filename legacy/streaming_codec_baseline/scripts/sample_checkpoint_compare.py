@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
 from typing import Iterable
 import sys
 import random
+from urllib.parse import unquote
 
 import soundfile as sf
 import torch
+import torchaudio
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = THIS_DIR.parent
@@ -64,6 +67,8 @@ def checkpoint_label(checkpoint_path: Path) -> str:
 
 def resolve_audio_path(manifest_path: Path, audio_path: str) -> Path:
     candidate = Path(audio_path)
+    if "://" in audio_path:
+        return candidate
     if candidate.is_absolute():
         return candidate.resolve()
     return (manifest_path.parent / candidate).resolve()
@@ -112,7 +117,51 @@ def save_codec_recon(
 ) -> None:
     full_codes = codes.reshape(-1, codes.size(-1))
     wav = decoder.decode_from_codes(full_codes)
-    sf.write(out_path, wav.numpy(), sample_rate)
+    sf.write(str(out_path), wav.squeeze().cpu().numpy(), sample_rate, format="WAV")
+
+
+def load_manifest_audio(manifest_path: Path, audio_path: str, sample_rate: int) -> torch.Tensor:
+    if audio_path.startswith("parquet://"):
+        payload = audio_path[len("parquet://") :]
+        parquet_path, row_idx_str = payload.rsplit("::", 1)
+        parquet_path = unquote(parquet_path)
+        row_idx = int(row_idx_str)
+        import pyarrow.parquet as pq  # type: ignore
+
+        table = pq.read_table(parquet_path, columns=["audio"])
+        rows = table.column("audio").to_pylist()
+        item = rows[row_idx]
+        if not isinstance(item, dict) or not isinstance(item.get("bytes"), (bytes, bytearray)):
+            raise RuntimeError(f"Invalid parquet audio payload at {parquet_path} row {row_idx}")
+        wav_np, sr = sf.read(io.BytesIO(bytes(item["bytes"])), always_2d=True)
+        wav = torch.from_numpy(wav_np).transpose(0, 1).float()
+        if wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        return wav
+
+    resolved = resolve_audio_path(manifest_path, audio_path)
+    try:
+        wav, sr = torchaudio.load(str(resolved))
+    except Exception:
+        wav_np, sr = sf.read(str(resolved), always_2d=True)
+        wav = torch.from_numpy(wav_np).transpose(0, 1).float()
+    if wav.size(0) > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    return wav
+
+
+def save_gt_audio(
+    manifest_path: Path,
+    audio_path: str,
+    out_path: Path,
+    sample_rate: int,
+) -> None:
+    wav = load_manifest_audio(manifest_path, audio_path, sample_rate=sample_rate)
+    sf.write(str(out_path), wav.squeeze().cpu().numpy(), sample_rate, format="WAV")
 
 
 @torch.no_grad()
@@ -332,9 +381,11 @@ def main() -> None:
     for idx in indices:
         sample = dataset[idx]
         manifest_item = manifest[idx]
-        gt_path = resolve_audio_path(manifest_path, manifest_item["audio_path"])
         sample_dir = out_root / f"sample_{idx:04d}"
         ensure_dir(sample_dir)
+        gt_path = sample_dir / "gt.wav"
+        if not gt_path.exists():
+            save_gt_audio(manifest_path, str(manifest_item["audio_path"]), gt_path, sample_rate)
         codec_path = sample_dir / "codec_recon_q2.wav"
         if not codec_path.exists():
             save_codec_recon(codec_decoder, sample.codes, codec_path, sample_rate)

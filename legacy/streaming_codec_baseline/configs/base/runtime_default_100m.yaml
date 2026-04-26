@@ -16,6 +16,12 @@ train:
   use_amp: true
   log_interval: 20
   val_interval: 1
+  qc:
+    enabled: false
+    interval_epochs: 10
+    sample_count: 5
+    seed: 42
+    splits: ["valid"]
 
 logging:
   backends: ["console"]

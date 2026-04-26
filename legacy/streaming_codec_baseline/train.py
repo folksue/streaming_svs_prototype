@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import torch
@@ -42,6 +44,57 @@ def resolve_config_paths(args: argparse.Namespace) -> list[str]:
     if not paths:
         paths = ["config.yaml"]
     return paths
+
+
+def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> None:
+    qc_cfg = cfg.get("train", {}).get("qc", {})
+    if not qc_cfg.get("enabled", False):
+        return
+    interval_epochs = int(qc_cfg.get("interval_epochs", 0) or 0)
+    if interval_epochs <= 0 or (epoch % interval_epochs) != 0:
+        return
+
+    splits = qc_cfg.get("splits", ["valid"])
+    if isinstance(splits, str):
+        splits = [splits]
+    sample_count = int(qc_cfg.get("sample_count", 5) or 5)
+    seed = int(qc_cfg.get("seed", cfg.get("seed", 42)))
+    repo_root = Path(__file__).resolve().parent
+    script_path = repo_root / "scripts" / "sample_checkpoint_compare.py"
+    qc_root = Path(cfg["paths"]["outputs"]).resolve() / "checkpoint_qc"
+    run_name = cfg.get("logging", {}).get("run_name") or Path(cfg["paths"]["checkpoints"]).name
+
+    for split in splits:
+        manifest_path = cfg.get("data", {}).get(f"{split}_manifest")
+        cache_path = cfg.get("data", {}).get(f"{split}_cache")
+        if not manifest_path or not cache_path:
+            print(f"[qc] skip split={split}: missing manifest/cache")
+            continue
+        out_dir = qc_root / str(split) / f"epoch_{epoch:03d}"
+        title = f"{run_name} {split} epoch {epoch:03d}"
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--cache",
+            str(cache_path),
+            "--manifest",
+            str(manifest_path),
+            "--checkpoints",
+            str(checkpoint_path),
+            "--random-sample",
+            "--sample-count",
+            str(sample_count),
+            "--seed",
+            str(seed),
+            "--out_dir",
+            str(out_dir),
+            "--title",
+            title,
+            "--link-style",
+            "relative",
+        ]
+        print(f"[qc] running split={split} epoch={epoch:03d} -> {out_dir}")
+        subprocess.run(cmd, cwd=repo_root, check=True)
 
 
 def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_size: int) -> StreamingSVSModel:
@@ -504,7 +557,12 @@ def main() -> None:
 
                 ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 10) or 10)
                 if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
-                    save_checkpoint(os.path.join(ckpt_dir, f"epoch_{epoch:03d}.pt"), payload)
+                    epoch_ckpt_path = Path(ckpt_dir) / f"epoch_{epoch:03d}.pt"
+                    save_checkpoint(str(epoch_ckpt_path), payload)
+                    try:
+                        run_periodic_checkpoint_qc(cfg, epoch_ckpt_path, epoch)
+                    except Exception as exc:
+                        print(f"[qc] skipped epoch={epoch:03d}: {exc}")
     except KeyboardInterrupt:
         interrupted_epoch = max(current_epoch - 1, 0)
         payload = {

@@ -7,6 +7,8 @@ audio:
   preprocess_batch_size: 8
 
 data:
+  train_manifest: artifacts/data/mixed_4ds_ace_8cq_train_manifest.json
+  valid_manifest: artifacts/data/mixed_4ds_ace_8cq_valid_manifest.json
   cache_shard_items: 2048
   batch_size: 32
   num_workers: 2
@@ -22,6 +24,12 @@ train:
   log_interval: 20
   val_interval: 1
   ckpt_interval_epochs: 10
+  qc:
+    enabled: true
+    interval_epochs: 10
+    sample_count: 5
+    seed: 42
+    splits: ["train", "valid"]
 
 logging:
   backends: ["console", "tensorboard"]
