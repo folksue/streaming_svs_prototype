@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from dataset import ShardAwareRandomSampler, SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
 from logging_utils import build_metric_logger
-from train import build_model, run_epoch, run_validation, resolve_config_paths
+from train import build_model, run_epoch, run_periodic_checkpoint_qc, run_validation, resolve_config_paths
 from utils import WarmupCosine, get_device, load_merged_yaml, normalize_config_paths, save_checkpoint, set_seed
 
 
@@ -122,25 +122,83 @@ def main() -> None:
                 {
                     "train/ce": float(tr["ce"]),
                     "train/acc": float(tr["acc"]),
+                    "train/coarse_acc": float(tr["coarse_acc"]),
+                    "train/fine_acc": float(tr["fine_acc"]),
+                    **{
+                        f"train/acc_k{k}": float(v)
+                        for k, v in sorted(
+                            ((int(key.replace("acc_k", "")), value) for key, value in tr.items() if key.startswith("acc_k")),
+                            key=lambda x: x[0],
+                        )
+                    },
                     "train/epoch": float(epoch),
                 },
                 step=global_step,
             )
 
+            train_per_k_str = " ".join(
+                f"train/acc_k{k}={tr[key]:.5f}"
+                for k, key in sorted(
+                    ((int(k.replace("acc_k", "")), k) for k in tr.keys() if k.startswith("acc_k")),
+                    key=lambda x: x[0],
+                )
+            )
+
             if epoch % cfg["train"]["val_interval"] == 0:
                 va = run_validation(model, valid_loader, dev)
+                val_per_k_str = " ".join(
+                    f"val/acc_k{k}={va[key]:.5f}"
+                    for k, key in sorted(
+                        ((int(k.replace("acc_k", "")), k) for k in va.keys() if k.startswith("acc_k")),
+                        key=lambda x: x[0],
+                    )
+                )
+                val_ar_per_k_str = " ".join(
+                    f"val/ar_acc_k{k}={va[key]:.5f}"
+                    for k, key in sorted(
+                        ((int(k.replace("ar_acc_k", "")), k) for k in va.keys() if k.startswith("ar_acc_k")),
+                        key=lambda x: x[0],
+                    )
+                )
                 print(
                     f"epoch={epoch:03d} "
                     f"train/ce={tr['ce']:.5f} train/acc={tr['acc']:.5f} "
+                    f"train/coarse_acc={tr['coarse_acc']:.5f} train/fine_acc={tr['fine_acc']:.5f} "
+                    f"{train_per_k_str} "
                     f"val/ce={va['ce']:.5f} val/acc={va['acc']:.5f} "
-                    f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f}"
+                    f"val/coarse_acc={va['coarse_acc']:.5f} val/fine_acc={va['fine_acc']:.5f} "
+                    f"val/on_acc={va['on_boundary_acc']:.5f} val/off_acc={va['off_boundary_acc']:.5f} "
+                    f"val/ar_acc={va['ar_acc']:.5f} "
+                    f"val/ar_coarse_acc={va['ar_coarse_acc']:.5f} val/ar_fine_acc={va['ar_fine_acc']:.5f} "
+                    f"{val_per_k_str} {val_ar_per_k_str}"
                 )
                 logger.log_metrics(
                     {
                         "val/ce": float(va["ce"]),
                         "val/acc": float(va["acc"]),
+                        "val/coarse_acc": float(va["coarse_acc"]),
+                        "val/fine_acc": float(va["fine_acc"]),
                         "val/on_boundary_acc": float(va["on_boundary_acc"]),
                         "val/off_boundary_acc": float(va["off_boundary_acc"]),
+                        "val/ar_acc": float(va["ar_acc"]),
+                        "val/ar_coarse_acc": float(va["ar_coarse_acc"]),
+                        "val/ar_fine_acc": float(va["ar_fine_acc"]),
+                        "val/ar_on_boundary_acc": float(va["ar_on_boundary_acc"]),
+                        "val/ar_off_boundary_acc": float(va["ar_off_boundary_acc"]),
+                        **{
+                            f"val/acc_k{k}": float(v)
+                            for k, v in sorted(
+                                ((int(key.replace("acc_k", "")), value) for key, value in va.items() if key.startswith("acc_k")),
+                                key=lambda x: x[0],
+                            )
+                        },
+                        **{
+                            f"val/ar_acc_k{k}": float(v)
+                            for k, v in sorted(
+                                ((int(key.replace("ar_acc_k", "")), value) for key, value in va.items() if key.startswith("ar_acc_k")),
+                                key=lambda x: x[0],
+                            )
+                        },
                         "val/epoch": float(epoch),
                     },
                     step=global_step,
@@ -160,7 +218,12 @@ def main() -> None:
                     save_checkpoint(os.path.join(cfg["paths"]["checkpoints"], "best.pt"), payload)
                 ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 0) or 0)
                 if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
-                    save_checkpoint(os.path.join(cfg["paths"]["checkpoints"], f"epoch_{epoch:03d}.pt"), payload)
+                    epoch_ckpt_path = Path(cfg["paths"]["checkpoints"]) / f"epoch_{epoch:03d}.pt"
+                    save_checkpoint(str(epoch_ckpt_path), payload)
+                    try:
+                        run_periodic_checkpoint_qc(cfg, epoch_ckpt_path, epoch)
+                    except Exception as exc:
+                        print(f"[qc] skipped epoch={epoch:03d}: {exc}")
     finally:
         logger.close()
 

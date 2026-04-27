@@ -50,7 +50,7 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
     qc_cfg = cfg.get("train", {}).get("qc", {})
     if not qc_cfg.get("enabled", False):
         return
-    interval_epochs = int(qc_cfg.get("interval_epochs", 0) or 0)
+    interval_epochs = int(cfg.get("train", {}).get("ckpt_interval_epochs", 0) or 0)
     if interval_epochs <= 0 or (epoch % interval_epochs) != 0:
         return
 

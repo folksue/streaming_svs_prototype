@@ -9,6 +9,8 @@ audio:
 data:
   train_manifest: artifacts/data/mixed_4ds_ace_8cq_train_manifest.json
   valid_manifest: artifacts/data/mixed_4ds_ace_8cq_valid_manifest.json
+  train_raw_codes_cache: artifacts/data/mixed_4ds_ace_8cq_train_raw_codes.pt
+  valid_raw_codes_cache: artifacts/data/mixed_4ds_ace_8cq_valid_raw_codes.pt
   cache_shard_items: 2048
   batch_size: 32
   num_workers: 2
@@ -26,8 +28,7 @@ train:
   ckpt_interval_epochs: 10
   qc:
     enabled: true
-    interval_epochs: 10
-    sample_count: 5
+    sample_count: 10
     seed: 42
     splits: ["train", "valid"]
 
