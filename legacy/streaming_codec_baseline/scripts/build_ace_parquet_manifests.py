@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -21,6 +22,22 @@ def make_audio_uri(parquet_path: Path, row_idx: int) -> str:
     return f"parquet://{quote(str(parquet_path.resolve()), safe='/:._-')}::{row_idx}"
 
 
+def infer_singer_from_segment_id(segment_id: str, dataset_type: str) -> str:
+    text = str(segment_id).strip()
+    if "#" in text:
+        return text.split("#", 1)[0].strip() or f"{dataset_type}_default"
+    m = re.match(r"^(acesinger_\\d+)", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    if text.isdigit():
+        return f"{dataset_type}_default"
+    if "_" in text:
+        prefix = text.split("_", 1)[0].strip()
+        if prefix and prefix.lower() not in {"seg", "utt", "sample"}:
+            return prefix
+    return f"{dataset_type}_default"
+
+
 def convert_row(row: dict, parquet_path: Path, row_idx: int, dataset_type: str) -> dict:
     if dataset_type == "ace-opencpop":
         phoneme_symbols = list(row["phn"])
@@ -36,6 +53,7 @@ def convert_row(row: dict, parquet_path: Path, row_idx: int, dataset_type: str) 
     return {
         "utt_id": str(row["segment_id"]),
         "audio_path": make_audio_uri(parquet_path, row_idx),
+        "singer": infer_singer_from_segment_id(str(row["segment_id"]), dataset_type=dataset_type),
         "phoneme_symbols": phoneme_symbols,
         "phoneme_intervals": phoneme_intervals,
         "note_pitch_midi": note_pitch_midi,

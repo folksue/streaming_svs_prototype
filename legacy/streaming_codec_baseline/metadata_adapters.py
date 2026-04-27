@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Iterable, List, Sequence
 
 from utils import ensure_dir, load_json, save_json
@@ -196,7 +197,10 @@ def normalize_standard_entry(entry: Dict[str, Any], base_dir: str) -> Dict[str, 
         normalized["singer_id"] = int(entry["singer_id"])
     else:
         singer_raw = first_present(entry, "singer", "speaker", "spk", "spk_id")
-        normalized["singer"] = normalize_singer_label(singer_raw, fallback=f"spk::{normalized['utt_id']}")
+        normalized["singer"] = normalize_singer_label(
+            singer_raw,
+            fallback=infer_singer_from_utt_id(normalized["utt_id"], default_label="spk_default"),
+        )
     return normalized
 
 
@@ -665,6 +669,11 @@ def infer_singer_from_utt_id(utt_id: str, default_label: str) -> str:
     text = str(utt_id).strip()
     if "#" in text:
         return text.split("#", 1)[0].strip() or default_label
+    m = re.match(r"^(acesinger_\d+)", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    if text.isdigit():
+        return default_label
     if "_" in text:
         prefix = text.split("_", 1)[0].strip()
         if prefix and prefix.lower() not in {"seg", "utt", "sample"}:
