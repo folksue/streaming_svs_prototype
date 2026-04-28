@@ -61,40 +61,114 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
     seed = int(qc_cfg.get("seed", cfg.get("seed", 42)))
     repo_root = Path(__file__).resolve().parent
     script_path = repo_root / "scripts" / "sample_checkpoint_compare.py"
+    append_script_path = repo_root / "scripts" / "append_checkpoint_compare.py"
+    ipynb_script_path = repo_root / "scripts" / "comparison_md_to_ipynb.py"
+    bundle_script_path = repo_root / "scripts" / "build_checkpoint_qc_bundle.py"
     qc_root = Path(cfg["paths"]["outputs"]).resolve() / "checkpoint_qc"
     run_name = cfg.get("logging", {}).get("run_name") or Path(cfg["paths"]["checkpoints"]).name
 
     for split in splits:
         manifest_path = cfg.get("data", {}).get(f"{split}_manifest")
         cache_path = cfg.get("data", {}).get(f"{split}_cache")
+        if split == "test":
+            if not manifest_path:
+                valid_manifest = cfg.get("data", {}).get("valid_manifest")
+                if isinstance(valid_manifest, str):
+                    candidates = [
+                        valid_manifest.replace("_valid_", "_test_"),
+                        valid_manifest.replace("_validation_", "_test_"),
+                    ]
+                    for cand in candidates:
+                        if Path(cand).exists():
+                            manifest_path = cand
+                            break
+            if not cache_path:
+                valid_cache = cfg.get("data", {}).get("valid_cache")
+                if isinstance(valid_cache, str):
+                    candidates = [
+                        valid_cache.replace("_valid_", "_test_"),
+                        valid_cache.replace("_validation_", "_test_"),
+                    ]
+                    for cand in candidates:
+                        if Path(cand).exists():
+                            cache_path = cand
+                            break
         if not manifest_path or not cache_path:
             print(f"[qc] skip split={split}: missing manifest/cache")
             continue
-        out_dir = qc_root / str(split) / f"epoch_{epoch:03d}"
+        out_dir = qc_root / str(split)
         title = f"{run_name} {split} epoch {epoch:03d}"
-        cmd = [
+        md_path = out_dir / "comparison.md"
+        if md_path.exists():
+            print(f"[qc] appending split={split} epoch={epoch:03d} -> {out_dir}")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(append_script_path),
+                    "--cache",
+                    str(cache_path),
+                    "--checkpoint",
+                    str(checkpoint_path),
+                    "--comparison-dir",
+                    str(out_dir),
+                    "--title",
+                    title,
+                    "--link-style",
+                    "relative",
+                ],
+                cwd=repo_root,
+                check=True,
+            )
+        else:
+            cmd = [
+                sys.executable,
+                str(script_path),
+                "--cache",
+                str(cache_path),
+                "--manifest",
+                str(manifest_path),
+                "--checkpoints",
+                str(checkpoint_path),
+                "--random-sample",
+                "--sample-count",
+                str(sample_count),
+                "--seed",
+                str(seed),
+                "--out_dir",
+                str(out_dir),
+                "--title",
+                title,
+                "--link-style",
+                "relative",
+            ]
+            print(f"[qc] creating split={split} epoch={epoch:03d} -> {out_dir}")
+            subprocess.run(cmd, cwd=repo_root, check=True)
+        md_path = out_dir / "comparison.md"
+        if md_path.exists():
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ipynb_script_path),
+                    "--md",
+                    str(md_path),
+                ],
+                cwd=repo_root,
+                check=True,
+            )
+    subprocess.run(
+        [
             sys.executable,
-            str(script_path),
-            "--cache",
-            str(cache_path),
-            "--manifest",
-            str(manifest_path),
-            "--checkpoints",
-            str(checkpoint_path),
-            "--random-sample",
-            "--sample-count",
-            str(sample_count),
-            "--seed",
-            str(seed),
-            "--out_dir",
-            str(out_dir),
+            str(bundle_script_path),
+            "--qc-root",
+            str(qc_root),
+            "--splits",
+            *[str(s) for s in splits],
             "--title",
-            title,
-            "--link-style",
-            "relative",
-        ]
-        print(f"[qc] running split={split} epoch={epoch:03d} -> {out_dir}")
-        subprocess.run(cmd, cwd=repo_root, check=True)
+            f"{run_name} checkpoint qc",
+        ],
+        cwd=repo_root,
+        check=True,
+    )
 
 
 def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_size: int) -> StreamingSVSModel:
