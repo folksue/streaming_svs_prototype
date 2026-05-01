@@ -52,6 +52,18 @@ def load_manifest(manifest_path: Path) -> list[dict]:
     return data
 
 
+def build_manifest_utt_map(manifest: list[dict]) -> dict[str, dict]:
+    mapping: dict[str, dict] = {}
+    for item in manifest:
+        utt_id = item.get("utt_id")
+        if not isinstance(utt_id, str) or not utt_id:
+            continue
+        # Keep first occurrence if duplicates exist.
+        if utt_id not in mapping:
+            mapping[utt_id] = item
+    return mapping
+
+
 def checkpoint_label(checkpoint_path: Path) -> str:
     stem = checkpoint_path.stem
     if stem == "best":
@@ -227,7 +239,7 @@ def write_markdown(
     checkpoint_columns: list[dict],
 ) -> None:
     lines = [f"# {title}", ""]
-    header = ["idx", "utt_id", "GT", "codec_recon_q2"]
+    header = ["idx", "utt_id", "GT", "codec_recon"]
     header.extend(col["label"] for col in checkpoint_columns)
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
@@ -237,7 +249,7 @@ def write_markdown(
             str(row["idx"]),
             f"`{row['utt_id']}`",
             f"[gt]({row['gt_path']})",
-            f"[codec_q2]({row['codec_path']})",
+            f"[codec]({row['codec_path']})",
         ]
         for col in checkpoint_columns:
             result = row["checkpoint_results"][col["label"]]
@@ -342,7 +354,7 @@ def write_html(
             <th>idx</th>
             <th>utt_id</th>
             <th>GT</th>
-            <th>codec_recon_q2</th>
+            <th>codec_recon</th>
             {cols}
           </tr>
         </thead>
@@ -367,6 +379,7 @@ def main() -> None:
 
     dataset = SVSSequenceDataset(str(cache_path))
     manifest = load_manifest(manifest_path)
+    manifest_utt_map = build_manifest_utt_map(manifest)
     device = get_device()
     ref_ckpt = torch.load(Path(args.checkpoints[0]).resolve(), map_location=device, weights_only=False)
     codec_decoder = EncodecDecoder(
@@ -380,13 +393,16 @@ def main() -> None:
     sample_rows: list[dict] = []
     for idx in indices:
         sample = dataset[idx]
-        manifest_item = manifest[idx]
+        manifest_item = manifest_utt_map.get(sample.utt_id)
+        if manifest_item is None:
+            # Fallback to positional index for legacy manifests that may miss utt_id.
+            manifest_item = manifest[idx]
         sample_dir = out_root / f"sample_{idx:04d}"
         ensure_dir(sample_dir)
         gt_path = sample_dir / "gt.wav"
         if not gt_path.exists():
             save_gt_audio(manifest_path, str(manifest_item["audio_path"]), gt_path, sample_rate)
-        codec_path = sample_dir / "codec_recon_q2.wav"
+        codec_path = sample_dir / f"codec_recon_k{sample.codes.size(-1)}.wav"
         if not codec_path.exists():
             save_codec_recon(codec_decoder, sample.codes, codec_path, sample_rate)
         sample_rows.append(

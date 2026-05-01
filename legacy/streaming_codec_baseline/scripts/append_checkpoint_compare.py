@@ -52,7 +52,10 @@ def parse_existing_md(md_path: Path) -> tuple[str, list[str], list[dict]]:
         idx = int(cells[0])
         utt_id = cells[1].strip("`")
         gt_path = re.search(r"\[gt\]\(([^)]+)\)", cells[2]).group(1)
-        codec_path = re.search(r"\[codec_q2\]\(([^)]+)\)", cells[3]).group(1)
+        codec_match = re.search(r"\[(?:codec|codec_q2)\]\(([^)]+)\)", cells[3])
+        if codec_match is None:
+            raise ValueError(f"Failed to parse codec cell: {cells[3]}")
+        codec_path = codec_match.group(1)
         checkpoint_results = {}
         for label, cell in zip(checkpoint_columns, cells[4:]):
             m = CELL_RE.search(cell)

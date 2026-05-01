@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 
 GT_RE = re.compile(r"\[gt\]\(([^)]+)\)")
-CODEC_RE = re.compile(r"\[codec_q2\]\(([^)]+)\)")
+CODEC_RE = re.compile(r"\[(?:codec|codec_q2)\]\(([^)]+)\)")
 WAV_RE = re.compile(r"\[wav\]\(([^)]+)\)<br>`acc=([0-9.]+)`")
 
 
