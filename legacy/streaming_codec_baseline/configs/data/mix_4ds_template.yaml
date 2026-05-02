@@ -21,6 +21,10 @@ data:
       manifest: /abs/path/to/kising/train.txt
       adapter: kising
       audio_root: /abs/path/to/kising/wavs
+      # Optional source-side filters by utt_id regex.
+      # Example: keep only Chinese-style IDs and drop explicit English IDs.
+      # include_utt_regex: ".*"
+      # exclude_utt_regex: "(?i)(^|[_-])en([_-]|$)|english"
 
   valid_sources:
     - name: opencpop_valid
@@ -39,6 +43,8 @@ data:
       manifest: /abs/path/to/kising/valid.txt
       adapter: kising
       audio_root: /abs/path/to/kising/wavs
+      # include_utt_regex: ".*"
+      # exclude_utt_regex: "(?i)(^|[_-])en([_-]|$)|english"
 
   auto_split_valid: false
   valid_ratio: 0.05

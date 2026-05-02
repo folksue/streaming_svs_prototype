@@ -941,3 +941,43 @@ Source: `third_party/SoulX-Singer/assets/technical-report.pdf`
   - 论文没有展开公开“全量训练数据来源采集/网页爬取/版权清洗”的工程细节与脚本；公开信息更偏向数据后处理与标注构建方法。
 - Open uncertainty:
   - 42k 训练语料的具体来源分布、授权策略、去重/过滤规则在论文中未细化到可复现实操级别。
+
+## 91. Moshi 的“多流”具体怎么做
+
+### Question
+Moshi 原文里的 multi-stream 到底是如何组织、训练和推理的？
+
+### Paper Evidence
+Source: `papers/moshi.pdf`
+- [papers/moshi.pdf#page=15](papers/moshi.pdf#page=15)
+  - Figure 4 直接给出多流联合序列；每一列是同一时间步的多个子流 token。
+  - 文中写明 depth Transformer 的预测顺序是“from bottom to top”。
+- [papers/moshi.pdf#page=17](papers/moshi.pdf#page=17)
+  - Equation (6) 明确联合流定义：
+    - `V_{s,1}`：Moshi 文本流（Inner Monologue）
+    - `V_{s,2}`：Moshi 语义 token（RVQ 第1层）
+    - `V_{s,1+q}`：Moshi 声学 token（其余 RVQ 层，带 acoustic delay `τ`）
+    - `V_{s,1+Q+1}`：用户语义 token
+    - `V_{s,1+Q+q}`：用户声学 token（同样带 `τ`）
+  - 总流数 `K = 2Q + 1`，实验里 `Q=8`，所以总计 `17` 条子流。
+- [papers/moshi.pdf#page=14](papers/moshi.pdf#page=14)
+  - RQ-Transformer 由 `Temporal Transformer + Depth Transformer` 组成：
+    - Temporal 沿时间步建模 `V_0..V_{s-1}`，得到上下文 `z_s`
+    - Depth 在当前步内按子流顺序建模 `V_{s,1..K}`
+  - 引入 acoustic delay（公式(4)）让语义先于高层声学层，减少同一步子流耦合，稳定生成。
+- [papers/moshi.pdf#page=17](papers/moshi.pdf#page=17)
+  - 推理时只采样 Moshi 自己相关子流（文本+Moshi 音频）；用户流在应用里用真实用户音频喂入，模型对用户流的预测可忽略。
+  - 因此没有显式 turn boundary，天然支持重叠说话（full duplex）。
+- [papers/moshi.pdf#page=16](papers/moshi.pdf#page=16)
+  - Inner Monologue 文本流与音频流是时间对齐的，并用 `PAD/EPAD` 组织。
+  - 通过“文本-音频相对延迟”可在同一架构下切换 ASR/TTS 行为。
+
+### Conclusion
+- Confirmed:
+  - Moshi 的“多流”不是把 token 全 flatten 成单流硬串行，而是“时间轴 + 步内子流轴”的层次自回归（RQ-Transformer）。
+  - 每个时间步会同时处理多条子流（文本、Moshi 语义/声学、用户语义/声学），并通过 acoustic delay 解耦。
+  - 训练目标是联合建模全流；在线推理时仅对 Moshi 相关流采样，用户流由真实输入覆盖。
+- Inference:
+  - 这种设计的关键收益是：在保持流式低延迟的同时，支持双工对话和重叠发声，不需要显式回合切分。
+- Open uncertainty:
+  - 论文给出的是机制与公式；具体工程实现细节（缓存布局、并行调度）需要结合其公开代码版本进一步核对。

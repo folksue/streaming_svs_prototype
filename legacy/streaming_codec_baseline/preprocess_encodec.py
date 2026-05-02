@@ -4,6 +4,7 @@ import argparse
 import io
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
@@ -703,6 +704,8 @@ def get_split_sources(cfg: Dict[str, Any], split_name: str) -> List[Dict[str, An
                     "adapter_name": str(source.get("adapter", data_cfg.get("manifest_adapter", "manifest"))),
                     "audio_root": source.get("audio_root"),
                     "source_name": str(source.get("name", f"{split_name}_src{idx}")),
+                    "include_utt_regex": source.get("include_utt_regex"),
+                    "exclude_utt_regex": source.get("exclude_utt_regex"),
                 }
             )
         return normalized_sources
@@ -716,8 +719,39 @@ def get_split_sources(cfg: Dict[str, Any], split_name: str) -> List[Dict[str, An
             "adapter_name": adapter_name,
             "audio_root": audio_root,
             "source_name": split_name,
+            "include_utt_regex": None,
+            "exclude_utt_regex": None,
         }
     ]
+
+
+def apply_source_filters(
+    entries: List[Dict[str, Any]],
+    *,
+    source_name: str,
+    include_utt_regex: str | None,
+    exclude_utt_regex: str | None,
+) -> List[Dict[str, Any]]:
+    include_re = re.compile(str(include_utt_regex)) if include_utt_regex else None
+    exclude_re = re.compile(str(exclude_utt_regex)) if exclude_utt_regex else None
+    if include_re is None and exclude_re is None:
+        return entries
+
+    before = len(entries)
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        uid = str(entry.get("utt_id", ""))
+        if include_re is not None and include_re.search(uid) is None:
+            continue
+        if exclude_re is not None and exclude_re.search(uid) is not None:
+            continue
+        out.append(entry)
+    print(
+        f"[source-filter] {source_name}: "
+        f"before={before} after={len(out)} dropped={before - len(out)} "
+        f"include={include_utt_regex!r} exclude={exclude_utt_regex!r}"
+    )
+    return out
 
 
 def maybe_auto_split_entries(
@@ -783,10 +817,18 @@ def prepare_entries(cfg: Dict[str, Any], split_names: List[str]) -> Dict[str, Li
             adapter_name = source["adapter_name"]
             audio_root = source.get("audio_root")
             source_name = source["source_name"]
+            include_utt_regex = source.get("include_utt_regex")
+            exclude_utt_regex = source.get("exclude_utt_regex")
             source_entries = load_manifest_entries(
                 manifest_path=manifest_path,
                 adapter_name=adapter_name,
                 audio_root=audio_root,
+            )
+            source_entries = apply_source_filters(
+                source_entries,
+                source_name=source_name,
+                include_utt_regex=include_utt_regex,
+                exclude_utt_regex=exclude_utt_regex,
             )
             for entry in source_entries:
                 uid = str(entry.get("utt_id", ""))
