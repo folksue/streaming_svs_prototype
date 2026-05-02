@@ -27,3 +27,7 @@ scripts/zotero_import.sh
 scripts/zotero_import.ps1
 legacy/streaming_codec_baseline/scripts/zotero_import.sh
 legacy/streaming_codec_baseline/scripts/zotero_import.ps1
+
+# Local large raw cache artifacts
+legacy/streaming_codec_baseline/mixed_4ds_ace_8cq_train_raw_codes.pt
+legacy/streaming_codec_baseline/mixed_4ds_ace_8cq_valid_raw_codes.pt
