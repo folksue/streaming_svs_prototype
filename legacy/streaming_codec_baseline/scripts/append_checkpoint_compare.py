@@ -19,7 +19,7 @@ from scripts.sample_checkpoint_compare import (  # type: ignore
 )
 
 
-CELL_RE = re.compile(r"\[wav\]\(([^)]+)\)<br>`acc=([0-9.]+)`")
+CELL_RE = re.compile(r"\[wav\]\(([^)]+)\)<br>`acc=([0-9.]+)`(?:<br>\[logits\]\(([^)]+)\))?")
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--comparison-dir", required=True)
     p.add_argument("--title", default=None)
     p.add_argument("--link-style", choices=["path", "fileuri", "relative"], default="relative")
+    p.add_argument("--dump-logits", action="store_true")
+    p.add_argument("--logits-topk", type=int, default=10)
+    p.add_argument("--no-infer-cache", action="store_true")
     return p.parse_args()
 
 
@@ -64,6 +67,7 @@ def parse_existing_md(md_path: Path) -> tuple[str, list[str], list[dict]]:
             checkpoint_results[label] = {
                 "wav_path": m.group(1),
                 "token_acc": float(m.group(2)),
+                "logits_path": m.group(3) or "",
             }
         rows.append(
             {
@@ -97,10 +101,19 @@ def main() -> None:
             cache_path=cache_path,
             indices=indices,
             out_root=comparison_dir,
+            dump_logits=args.dump_logits,
+            logits_topk=args.logits_topk,
+            use_infer_cache=not args.no_infer_cache,
         )
         for row in sample_rows:
             result = dict(results[row["idx"]])
             result["wav_path"] = format_link_target(Path(result["wav_path"]), args.link_style, comparison_dir)
+            if result.get("logits_path"):
+                result["logits_path"] = format_link_target(
+                    Path(result["logits_path"]),
+                    args.link_style,
+                    comparison_dir,
+                )
             row["checkpoint_results"][label] = result
         checkpoint_labels.append(label)
 

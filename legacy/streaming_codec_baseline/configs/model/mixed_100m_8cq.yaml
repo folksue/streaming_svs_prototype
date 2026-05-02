@@ -3,3 +3,5 @@ __base__:
 
 model:
   phoneme_vocab_size: 2048
+  singer_vocab_size: 64
+  singer_emb_dim: 32

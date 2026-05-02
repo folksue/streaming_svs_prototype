@@ -1,0 +1,13 @@
+__base__:
+  - mixed_4ds_ace_100m_8cq.yaml
+
+data:
+  batch_size: 24
+
+logging:
+  tensorboard_dir: artifacts/runs/mixed_4ds_ace_100m_8cq_singerfix_rerun
+  run_name: mixed_4ds_ace_100m_8cq_singerfix_rerun
+
+paths:
+  checkpoints: artifacts/checkpoints/mixed_4ds_ace_100m_8cq_singerfix_rerun
+  outputs: artifacts/outputs/mixed_4ds_ace_100m_8cq_singerfix_rerun

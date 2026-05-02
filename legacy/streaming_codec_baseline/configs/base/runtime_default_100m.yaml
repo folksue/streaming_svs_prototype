@@ -16,6 +16,7 @@ train:
   use_amp: true
   log_interval: 20
   val_interval: 1
+  save_every_epoch_until: 0
   qc:
     enabled: false
     interval_epochs: 10

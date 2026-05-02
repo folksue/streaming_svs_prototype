@@ -25,9 +25,11 @@ train:
   use_amp: true
   log_interval: 20
   val_interval: 1
+  save_every_epoch_until: 20
   ckpt_interval_epochs: 10
   qc:
     enabled: true
+    interval_epochs: 10
     sample_count: 10
     seed: 42
     splits: ["train", "valid"]

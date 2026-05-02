@@ -46,11 +46,51 @@ def resolve_config_paths(args: argparse.Namespace) -> list[str]:
     return paths
 
 
+def get_ckpt_interval_epochs(cfg: dict) -> int:
+    return int(cfg.get("train", {}).get("ckpt_interval_epochs", 0) or 0)
+
+
+def get_qc_interval_epochs(cfg: dict) -> int:
+    qc_cfg = cfg.get("train", {}).get("qc", {})
+    return int(qc_cfg.get("interval_epochs", 0) or 0)
+
+
+def get_save_every_epoch_until(cfg: dict) -> int:
+    return int(cfg.get("train", {}).get("save_every_epoch_until", 0) or 0)
+
+
+def should_save_epoch_checkpoint(cfg: dict, epoch: int) -> bool:
+    early_until = get_save_every_epoch_until(cfg)
+    if early_until > 0 and epoch <= early_until:
+        return True
+    ckpt_interval = get_ckpt_interval_epochs(cfg)
+    return ckpt_interval > 0 and (epoch % ckpt_interval) == 0
+
+
+def validate_periodic_artifact_schedule(cfg: dict) -> None:
+    qc_cfg = cfg.get("train", {}).get("qc", {})
+    if not bool(qc_cfg.get("enabled", False)):
+        return
+    ckpt_interval = get_ckpt_interval_epochs(cfg)
+    qc_interval = get_qc_interval_epochs(cfg)
+    if ckpt_interval <= 0:
+        raise ValueError("train.qc.enabled=true requires train.ckpt_interval_epochs > 0.")
+    if qc_interval <= 0:
+        raise ValueError("train.qc.enabled=true requires train.qc.interval_epochs > 0.")
+    early_until = get_save_every_epoch_until(cfg)
+    if (qc_interval % ckpt_interval) != 0 and qc_interval > early_until:
+        raise ValueError(
+            "train.qc.interval_epochs must be covered by checkpoint saving. "
+            "For epochs beyond train.save_every_epoch_until, it must be an integer multiple of "
+            f"train.ckpt_interval_epochs (got qc={qc_interval}, ckpt={ckpt_interval}, early_until={early_until})."
+        )
+
+
 def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> None:
     qc_cfg = cfg.get("train", {}).get("qc", {})
     if not qc_cfg.get("enabled", False):
         return
-    interval_epochs = int(cfg.get("train", {}).get("ckpt_interval_epochs", 0) or 0)
+    interval_epochs = get_qc_interval_epochs(cfg)
     if interval_epochs <= 0 or (epoch % interval_epochs) != 0:
         return
 
@@ -59,6 +99,9 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
         splits = [splits]
     sample_count = int(qc_cfg.get("sample_count", 5) or 5)
     seed = int(qc_cfg.get("seed", cfg.get("seed", 42)))
+    dump_logits = bool(qc_cfg.get("dump_logits", False))
+    logits_topk = int(qc_cfg.get("logits_topk", 10) or 10)
+    use_infer_cache = bool(qc_cfg.get("use_infer_cache", True))
     repo_root = Path(__file__).resolve().parent
     script_path = repo_root / "scripts" / "sample_checkpoint_compare.py"
     append_script_path = repo_root / "scripts" / "append_checkpoint_compare.py"
@@ -97,6 +140,7 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
             print(f"[qc] skip split={split}: missing manifest/cache")
             continue
         out_dir = qc_root / str(split)
+        indices_file = out_dir / "sample_indices.json"
         title = f"{run_name} {split} epoch {epoch:03d}"
         md_path = out_dir / "comparison.md"
         if md_path.exists():
@@ -115,6 +159,10 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
                     title,
                     "--link-style",
                     "relative",
+                    "--logits-topk",
+                    str(logits_topk),
+                    *(["--dump-logits"] if dump_logits else []),
+                    *(["--no-infer-cache"] if not use_infer_cache else []),
                 ],
                 cwd=repo_root,
                 check=True,
@@ -129,6 +177,8 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
                 str(manifest_path),
                 "--checkpoints",
                 str(checkpoint_path),
+                "--indices-file",
+                str(indices_file),
                 "--random-sample",
                 "--sample-count",
                 str(sample_count),
@@ -140,6 +190,10 @@ def run_periodic_checkpoint_qc(cfg: dict, checkpoint_path: Path, epoch: int) -> 
                 title,
                 "--link-style",
                 "relative",
+                "--logits-topk",
+                str(logits_topk),
+                *(["--dump-logits"] if dump_logits else []),
+                *(["--no-infer-cache"] if not use_infer_cache else []),
             ]
             print(f"[qc] creating split={split} epoch={epoch:03d} -> {out_dir}")
             subprocess.run(cmd, cwd=repo_root, check=True)
@@ -450,6 +504,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
     cfg = normalize_config_paths(load_merged_yaml(resolve_config_paths(args)), repo_root=repo_root)
     set_seed(cfg["seed"])
+    validate_periodic_artifact_schedule(cfg)
 
     dev = get_device()
 
@@ -629,8 +684,7 @@ def main() -> None:
                     best_val = va["ce"]
                     save_checkpoint(os.path.join(ckpt_dir, "best.pt"), payload)
 
-                ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 10) or 10)
-                if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
+                if should_save_epoch_checkpoint(cfg, epoch):
                     epoch_ckpt_path = Path(ckpt_dir) / f"epoch_{epoch:03d}.pt"
                     save_checkpoint(str(epoch_ckpt_path), payload)
                     try:

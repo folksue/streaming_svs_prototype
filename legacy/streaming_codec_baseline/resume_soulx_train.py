@@ -10,7 +10,16 @@ from torch.utils.data import DataLoader
 
 from dataset import ShardAwareRandomSampler, SVSSequenceDataset, collate_sequences, validate_cache_meta_compatibility
 from logging_utils import build_metric_logger
-from train import build_model, run_epoch, run_periodic_checkpoint_qc, run_validation, resolve_config_paths
+from train import (
+    build_model,
+    get_ckpt_interval_epochs,
+    should_save_epoch_checkpoint,
+    run_epoch,
+    run_periodic_checkpoint_qc,
+    run_validation,
+    resolve_config_paths,
+    validate_periodic_artifact_schedule,
+)
 from utils import WarmupCosine, get_device, load_merged_yaml, normalize_config_paths, save_checkpoint, set_seed
 
 
@@ -29,6 +38,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
     cfg = normalize_config_paths(load_merged_yaml(resolve_config_paths(args)), repo_root=repo_root)
     set_seed(cfg["seed"])
+    validate_periodic_artifact_schedule(cfg)
     dev = get_device()
 
     ckpt_dir = Path(cfg["paths"]["checkpoints"])
@@ -216,8 +226,7 @@ def main() -> None:
                 if va["ce"] < best_val:
                     best_val = va["ce"]
                     save_checkpoint(os.path.join(cfg["paths"]["checkpoints"], "best.pt"), payload)
-                ckpt_interval = int(cfg["train"].get("ckpt_interval_epochs", 0) or 0)
-                if ckpt_interval > 0 and (epoch % ckpt_interval) == 0:
+                if should_save_epoch_checkpoint(cfg, epoch):
                     epoch_ckpt_path = Path(cfg["paths"]["checkpoints"]) / f"epoch_{epoch:03d}.pt"
                     save_checkpoint(str(epoch_ckpt_path), payload)
                     try:
