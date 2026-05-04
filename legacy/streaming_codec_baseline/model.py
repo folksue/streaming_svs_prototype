@@ -250,7 +250,7 @@ class LocalCausalSelfAttentionBlock(nn.Module):
         cache_k: torch.Tensor | None,  # [B, H, Lc, Dh]
         cache_v: torch.Tensor | None,  # [B, H, Lc, Dh]
         position_id: torch.Tensor,  # [1]
-        window_size: int,
+        window_size: int | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.norm1(x_new)
         b, l, _ = h.shape
@@ -270,7 +270,7 @@ class LocalCausalSelfAttentionBlock(nn.Module):
             k_cat = torch.cat([cache_k, k], dim=2)
             v_cat = torch.cat([cache_v, v], dim=2)
 
-        if k_cat.size(2) > window_size:
+        if window_size is not None and k_cat.size(2) > int(window_size):
             k_cat = k_cat[:, :, -window_size:, :]
             v_cat = v_cat[:, :, -window_size:, :]
 
@@ -321,6 +321,7 @@ class StreamingSVSModel(nn.Module):
         history_window: int,
         num_blocks: int,
         audio_history_window: int = 64,  # kept for config compatibility
+        use_local_history_window: bool = True,
         control_encoder_type: str = "mlp",
         control_conv_layers: int = 0,
         control_conv_hidden_mult: float = 2.0,
@@ -342,7 +343,10 @@ class StreamingSVSModel(nn.Module):
         # One frame-slot per step position; each frame predicts K codebooks in parallel.
         self.audio_slots_per_step = self.tokens_per_step
         self.seq_len_per_step = 1 + self.audio_slots_per_step
-        self.token_history_window = max(1, int(history_window)) * self.seq_len_per_step
+        self.use_local_history_window = bool(use_local_history_window)
+        self.token_history_window = (
+            max(1, int(history_window)) * self.seq_len_per_step if self.use_local_history_window else None
+        )
         self.prefix_pad_steps = max(0, int(prefix_pad_steps))
 
         self.cond_enc = ConditionEncoder(
@@ -360,7 +364,9 @@ class StreamingSVSModel(nn.Module):
         self.codebook_token_emb = nn.ModuleList(
             [nn.Embedding(self.codebook_size, token_emb_dim) for _ in range(self.num_codebooks)]
         )
-        self.audio_in = nn.Linear(token_emb_dim, model_dim)
+        # Keep an explicit projection only when dimensions differ.
+        # When token_emb_dim == model_dim, pass through directly to avoid redundant affine transform.
+        self.audio_in = nn.Identity() if int(token_emb_dim) == int(model_dim) else nn.Linear(token_emb_dim, model_dim)
         self.control_encoder_type = str(control_encoder_type).lower().strip()
         self.control_conv_layers = int(control_conv_layers)
         if self.control_encoder_type not in {"mlp", "convnext"}:
@@ -425,9 +431,11 @@ class StreamingSVSModel(nn.Module):
             x = blk(x)
         return x
 
-    def _build_local_attn_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+    def _build_attn_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         idx = torch.arange(seq_len, device=device)
         dist = idx[:, None] - idx[None, :]
+        if self.token_history_window is None:
+            return dist < 0
         return (dist < 0) | (dist >= self.token_history_window)
 
     def _embed_frame_tokens(self, frame_codes: torch.Tensor) -> torch.Tensor:
@@ -528,7 +536,7 @@ class StreamingSVSModel(nn.Module):
         valid_pos: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        attn_mask = self._build_local_attn_mask(seq_in.size(1), seq_in.device)
+        attn_mask = self._build_attn_mask(seq_in.size(1), seq_in.device)
         key_padding_mask = ~valid_pos
         x = seq_in
         for blk in self.blocks:

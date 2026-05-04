@@ -10,12 +10,13 @@ model:
   singer_vocab_size: 128
   singer_emb_dim: 16
   cond_dim: 128
-  token_emb_dim: 96
+  token_emb_dim: 192
   prev_step_dim: 128
   model_dim: 192
   attn_heads: 6
   attn_layers: 2
   history_window: 16
+  use_local_history_window: false
   num_blocks: 2
   audio_history_window: 64
   control_encoder_type: mlp

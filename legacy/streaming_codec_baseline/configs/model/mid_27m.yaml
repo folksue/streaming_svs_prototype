@@ -7,12 +7,13 @@ model:
   phone_progress_bins: 8
   phone_progress_emb_dim: 32
   cond_dim: 256
-  token_emb_dim: 160
+  token_emb_dim: 512
   prev_step_dim: 256
   model_dim: 512
   attn_heads: 8
   attn_layers: 4
   history_window: 16
+  use_local_history_window: false
   num_blocks: 4
   audio_history_window: 64
   control_encoder_type: mlp

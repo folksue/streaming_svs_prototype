@@ -39,12 +39,13 @@ model:
   singer_vocab_size: 512
   singer_emb_dim: 64
   cond_dim: 384
-  token_emb_dim: 192
+  token_emb_dim: 768
   prev_step_dim: 384
   model_dim: 768
   attn_heads: 12
   attn_layers: 6
   history_window: 16
+  use_local_history_window: false
   num_blocks: 8
   audio_history_window: 64
   control_encoder_type: mlp   # choices: mlp | convnext

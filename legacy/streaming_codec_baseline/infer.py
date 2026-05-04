@@ -7,10 +7,21 @@ from typing import Dict
 import numpy as np
 import soundfile as sf
 import torch
+import torch.nn as nn
 
 from dataset import SVSSequenceDataset
 from model import StreamingSVSModel
 from utils import get_device, masked_code_accuracy
+
+
+def _load_model_state_compat(model: StreamingSVSModel, state: dict) -> None:
+    # Backward compatibility for checkpoints saved before audio_in became Identity
+    # in same-dimension configs.
+    if isinstance(model.audio_in, nn.Identity):
+        state = dict(state)
+        state.pop("audio_in.weight", None)
+        state.pop("audio_in.bias", None)
+    model.load_state_dict(state, strict=True)
 
 
 class EncodecDecoder:
@@ -106,6 +117,7 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
         history_window=cfg.get("history_window", 8),
         num_blocks=cfg["num_blocks"],
         audio_history_window=cfg.get("audio_history_window", 64),
+        use_local_history_window=cfg.get("use_local_history_window", True),
         control_encoder_type=cfg.get("control_encoder_type", "mlp"),
         control_conv_layers=cfg.get("control_conv_layers", 0),
         control_conv_hidden_mult=cfg.get("control_conv_hidden_mult", 2.0),
@@ -118,7 +130,7 @@ def build_model(ckpt: Dict, dev: torch.device) -> StreamingSVSModel:
         ffn_bias=cfg.get("ffn_bias", False),
         norm_eps=cfg.get("norm_eps", 1e-6),
     ).to(dev)
-    model.load_state_dict(ckpt["model"], strict=True)
+    _load_model_state_compat(model, ckpt["model"])
     model.eval()
     return model
 

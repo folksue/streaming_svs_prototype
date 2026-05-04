@@ -39,12 +39,13 @@ model:
   singer_vocab_size: 512
   singer_emb_dim: 32
   cond_dim: 256
-  token_emb_dim: 128
+  token_emb_dim: 512
   prev_step_dim: 256
   model_dim: 512
   attn_heads: 8
   attn_layers: 4
   history_window: 8
+  use_local_history_window: false
   num_blocks: 6
   audio_history_window: 64
   # ===== Ablation knobs (keep future ablation params in this block) =====

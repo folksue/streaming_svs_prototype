@@ -257,6 +257,7 @@ def build_model(cfg: dict, num_codebooks: int, tokens_per_step: int, codebook_si
         history_window=m.get("history_window", 8),
         num_blocks=m["num_blocks"],
         audio_history_window=m.get("audio_history_window", 64),
+        use_local_history_window=m.get("use_local_history_window", True),
         control_encoder_type=m.get("control_encoder_type", "mlp"),
         control_conv_layers=m.get("control_conv_layers", 0),
         control_conv_hidden_mult=m.get("control_conv_hidden_mult", 2.0),
